@@ -2168,7 +2168,7 @@ def manage_trades():
         if not be_locked.get(pos.ticket, False):
             if pos.type == mt5.ORDER_TYPE_BUY and tick.bid >= be_target:
                 spread = max((tick.ask - tick.bid), 0.0)
-                new_sl = pos.price_open + spread
+                new_sl = pos.price_open - spread
                 want_be_lock = True
             elif pos.type == mt5.ORDER_TYPE_SELL and tick.ask <= be_target:
                 spread = max((tick.ask - tick.bid), 0.0)
