@@ -1179,7 +1179,14 @@ def classify_gold_regime(symbol="XAUUSD"):
     # else stays CORRECTIVE
 
     # Update global state
+    _previous_regime = _current_gold_regime
     _current_gold_regime = new_regime
+
+    if _previous_regime is not None and _previous_regime != _current_gold_regime:
+        logger.info("[GOLD_REGIME_CHANGE] XAUUSD | %s → %s | h1_ema=%s | "
+                    "h4_atr_ratio=%.2f | h4_crosses=%d",
+                    _previous_regime, _current_gold_regime,
+                    h1_direction, h4_atr_ratio, h4_crosses)
 
     # Log every 30 minutes
     now = time.time()
@@ -2391,7 +2398,7 @@ def get_signal(symbol):
     # V5.3 — In CORRECTIVE regime, XAUUSD oscillates by definition
     # HTF flips constantly — allow both directions when CORRECTIVE
     gold_corrective = (symbol == "XAUUSD" and
-                       classify_gold_regime(symbol) == "CORRECTIVE")
+                       _current_gold_regime == "CORRECTIVE")
 
     if htf_mismatch and not gold_corrective:
         warn_key = (symbol, bos_idx)
@@ -2444,6 +2451,32 @@ def get_signal(symbol):
     asia           = in_asia_session(utc_now)
 
     # --- MODE 1: BREAKOUT ---
+    # V5.4 — TRENDING breakout diagnostic logging
+    if symbol == "XAUUSD" and _current_gold_regime == "TRENDING":
+        _bos_fresh = is_fresh_bos(symbol, bos_idx)
+        _htf_aligned = not ((htf_trend == "BULL" and bos_type == "BOS_SELL") or
+                            (htf_trend == "BEAR" and bos_type == "BOS_BUY"))
+        _disp_ok = displacement >= atr * BREAKOUT_DISP_MULT if displacement else False
+        _blocked_by = (
+            "stale_bos" if not _bos_fresh else
+            "htf_mismatch" if not _htf_aligned else
+            "insufficient_displacement" if not _disp_ok else
+            "score_or_candle"
+        )
+        logger.info(
+            "[XAUUSD_TRENDING_BREAKOUT] regime=%s | htf=%s | "
+            "bos_type=%s | bos_idx=%s | fresh=%s | "
+            "htf_aligned=%s | disp=%.5f | atr=%.5f | "
+            "disp_req=%.5f | blocked_by=%s",
+            _current_gold_regime, htf_trend,
+            bos_type, bos_idx, _bos_fresh,
+            _htf_aligned,
+            displacement if displacement else 0,
+            atr if atr else 0,
+            (atr * BREAKOUT_DISP_MULT) if atr else 0,
+            _blocked_by if not _bos_fresh or not _htf_aligned or not _disp_ok else "NONE_PROCEEDING",
+        )
+
     if is_fresh_bos(symbol, bos_idx):
         if displacement >= atr * BREAKOUT_DISP_MULT:
             if bos_candle_quality_ok(rates_signal, bos_idx, direction, symbol=symbol):
@@ -2539,7 +2572,7 @@ def get_signal(symbol):
         # V2/V4: Check if pullback is enabled for this symbol (regime-aware for XAUUSD)
         pb_enabled = _get_xauusd_effective_param("pullback_enabled", True) if symbol == "XAUUSD" else SYMBOL_CONFIG.get(symbol, {}).get("pullback_enabled", True)
         if not pb_enabled:
-            logger.info("%s | PULLBACK blocked — pullback disabled in config (V2/V4)", symbol)
+            logger.debug("%s | PULLBACK blocked — pullback disabled in config (V2/V4)", symbol)
             _gate_hit(symbol, "pullback_disabled")
             return "HOLD", price, None
         rates_entry_r = mt5.copy_rates_from_pos(symbol, ENTRY_TF, 0, 5)
@@ -2835,7 +2868,7 @@ def check_pending_pullbacks():
             # V2/V4: Check if pullback is enabled for this symbol (regime-aware for XAUUSD)
             pb_enabled = _get_xauusd_effective_param("pullback_enabled", True) if symbol == "XAUUSD" else SYMBOL_CONFIG.get(symbol, {}).get("pullback_enabled", True)
             if not pb_enabled:
-                logger.info("%s | PENDING PULLBACK blocked — pullback disabled in config (V2/V4)", symbol)
+                logger.debug("%s | PENDING PULLBACK blocked — pullback disabled in config (V2/V4)", symbol)
                 _gate_hit(symbol, "pullback_disabled")
                 continue
             imp_lo = setup.get("impulse_low")
