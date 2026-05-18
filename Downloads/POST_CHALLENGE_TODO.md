@@ -187,3 +187,5 @@ A comprehensive regime-aware gold trading system designed specifically for XAUUS
 - GBPJPY sl_pips: 200→50, tp_pips: 350→100 (was 8x wider than GBPUSD in % terms)
 - Claude SL context: JPY pairs now show points not pips (pip_value≥0.01 check)
 - USDJPY sl_pips: 150→80, tp_pips: 225→160 (1.5 point SL was excessive)
+- dashboard_api.py: today's date filtering switched from UTC to London timezone
+- FTMO_V1.py: reconstructed trade PnL clamped to 0 if outside [-500, +1000] bounds
