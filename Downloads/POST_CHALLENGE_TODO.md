@@ -182,3 +182,5 @@ A comprehensive regime-aware gold trading system designed specifically for XAUUS
 - MAX_TRADES_PER_DAY: 3 → 6
 - RISK_PERCENT: 0.003 → 0.005
 - displacement added to meta_base (was always 0 — critical bug)
+- XAUUSD 22xx UTC block exempted (Sydney session active for gold)
+- XAUUSD Asia block tightened 00:00-05:00 → 00:00-01:00 UTC (Tokyo gold session now open)
