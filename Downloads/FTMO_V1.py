@@ -3828,6 +3828,14 @@ def _finalise_close(ticket, known_symbol, deal, meta=None):
                            " | orig_sl=%.5f | tp=%.5f | lot=%s | VERIFY_IN_MT5",
                            known_symbol, ticket, _dir, _entry, _orig_sl, _tp, _lot)
 
+        # Sanity check — reconstructed PnL should be within reasonable bounds
+        # Max possible loss at max risk = 0.8% of 35000 = £280
+        MAX_REASONABLE_LOSS = -500
+        MAX_REASONABLE_WIN = 1000
+        if est_pl is not None and (est_pl < MAX_REASONABLE_LOSS or est_pl > MAX_REASONABLE_WIN):
+            logger.warning("[TRADE_RESULT] Reconstructed PnL %.2f outside reasonable bounds — using 0", est_pl)
+            est_pl = 0.0
+
         # Always emit TRADE_RESULT so dashboard/analytics have a row regardless
         logger.info(
             "[TRADE_RESULT] symbol=%s | direction=%s | mode=%s | score=%s | session=%s"
