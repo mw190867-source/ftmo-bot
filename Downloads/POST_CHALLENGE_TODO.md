@@ -189,3 +189,4 @@ A comprehensive regime-aware gold trading system designed specifically for XAUUS
 - USDJPY sl_pips: 150→80, tp_pips: 225→160 (1.5 point SL was excessive)
 - dashboard_api.py: today's date filtering switched from UTC to London timezone
 - FTMO_V1.py: reconstructed trade PnL clamped to 0 if outside [-500, +1000] bounds
+- FTMO_V1.py: reconstructed PnL sanity check now tries MT5 deals before zeroing (prevents trades disappearing from dashboard)
