@@ -186,3 +186,4 @@ A comprehensive regime-aware gold trading system designed specifically for XAUUS
 - XAUUSD Asia block tightened 00:00-05:00 → 00:00-01:00 UTC (Tokyo gold session now open)
 - GBPJPY sl_pips: 200→50, tp_pips: 350→100 (was 8x wider than GBPUSD in % terms)
 - Claude SL context: JPY pairs now show points not pips (pip_value≥0.01 check)
+- USDJPY sl_pips: 150→80, tp_pips: 225→160 (1.5 point SL was excessive)
