@@ -1726,7 +1726,8 @@ def in_blocked_hour(symbol, utc_dt):
     """V2: Hard block specific hours identified as high-loss windows."""
     h = utc_dt.hour + utc_dt.minute / 60.0
     # Block 22:xx UTC all symbols (4 trades, -£1,057, 0 wins in challenge)
-    if 22.0 <= h < 23.0:
+    # V5.4 — 22xx block forex only, not XAUUSD (Sydney session active for gold)
+    if 22.0 <= h < 23.0 and symbol != "XAUUSD":
         return True, "22xx_utc_block"
     # V5 (May 13): Narrowed XAUUSD block 15:00-17:00 UTC → 15:30-16:30 UTC (US data window only)
     if symbol == "XAUUSD" and 15.5 <= h < 16.5:
@@ -2400,13 +2401,15 @@ def get_signal(symbol):
         _gate_hit(symbol, "htf_mismatch")
         return "HOLD", price, None
 
-    # XAUUSD Asia disable — V5 (May 13): full block 00:00-05:00 UTC, 05:00-07:00 allowed (pre-London setup window)
+    # V5.4 — Only block 00:00-01:00 UTC (rollover/thin liquidity)
+    # 01:00-05:00 UTC is genuine Tokyo gold session — allow trading
+    # Spread limit (0.65) and CORRECTIVE regime filter bad setups naturally
     if symbol == "XAUUSD" and in_asia_session(utc_now):
         utc_hour = utc_now.hour + utc_now.minute / 60.0
-        if utc_hour < 5.0:
+        if utc_hour < 1.0:
             _gate_hit(symbol, "asia_disabled")
             return "HOLD", price, None
-        # 05:00-07:00 UTC allowed — pre-London gold setup window
+        # 01:00-07:00 UTC allowed — Tokyo gold session + pre-London window
 
     direction = "BUY" if bos_type == "BOS_BUY" else "SELL"
 
