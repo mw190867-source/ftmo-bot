@@ -940,7 +940,7 @@ SYMBOL_CONFIG = {
         "atr_mult_tp": 1.8, "trail_mult": 0.5,
         "atr_mult_sl": 1.2, "cooldown": 300,
         "max_trades": 2,                # V5.3 — still proving itself
-        "weekdays": [0,1,2,3,4], "sl_pips": 150, "tp_pips": 225, "type": "forex",
+        "weekdays": [0,1,2,3,4], "sl_pips": 80, "tp_pips": 160, "type": "forex",  # V5.4 — reduced from 150/225, 1.5 point SL was excessive for USDJPY
         # spread_limit tightened 2026-05-06 from 0.03 → 0.015 after observing
         # 0.014 spread during NY overlap on day 1. Normal USDJPY spread is
         # 0.003-0.004, so 0.015 = ~4x normal headroom — generous enough to
