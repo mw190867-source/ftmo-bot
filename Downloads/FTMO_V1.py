@@ -200,7 +200,9 @@ def _build_claude_context(symbol, direction, entry_mode, score, meta, utc_dt, at
 
     pip_val = float(c.get("pip_value", 0.0001))
     sl_pips_raw = round(sl_dist / pip_val, 1) if pip_val else None
-    if c.get("type") == "commodity":
+    # Commodities and JPY pairs (pip_value=0.01) show in points not pips
+    # to avoid misleading Claude with inflated pip counts
+    if c.get("type") == "commodity" or float(c.get("pip_value", 0.0001)) >= 0.01:
         sl_context = f"{round(sl_dist, 2)} points"
     else:
         sl_context = f"{sl_pips_raw} pips" if sl_pips_raw else None
@@ -981,7 +983,7 @@ SYMBOL_CONFIG = {
         "max_trades": 3 if TESTING_MODE else 2,
         "max_trades_per_day": 3,
         "weekdays": [0,1,2,3,4],
-        "sl_pips": 200, "tp_pips": 350, "type": "forex",
+        "sl_pips": 50, "tp_pips": 100, "type": "forex",  # V5.4 — reduced from 200/350, was 8x wider than GBPUSD in % terms, Claude correctly blocking
         "atr_threshold": 0.05, "pip_value": 0.01, "spread_limit": 0.08,
         "bos_min_disp_mult": 0.30, "bos_lookback": 50,
         "bos_use_wicks": False, "bos_require_cross": False,
