@@ -3833,8 +3833,16 @@ def _finalise_close(ticket, known_symbol, deal, meta=None):
         MAX_REASONABLE_LOSS = -500
         MAX_REASONABLE_WIN = 1000
         if est_pl is not None and (est_pl < MAX_REASONABLE_LOSS or est_pl > MAX_REASONABLE_WIN):
-            logger.warning("[TRADE_RESULT] Reconstructed PnL %.2f outside reasonable bounds — using 0", est_pl)
-            est_pl = 0.0
+            # Try to get actual profit from MT5 deal history
+            deals = mt5.history_deals_get(ticket=ticket)
+            if deals:
+                actual_pl = sum(d.profit for d in deals)
+                logger.warning("[TRADE_RESULT] Reconstructed PnL %.2f clamped — using MT5 actual %.2f",
+                               est_pl, actual_pl)
+                est_pl = actual_pl
+            else:
+                logger.warning("[TRADE_RESULT] Reconstructed PnL %.2f outside bounds, no deals found — using 0", est_pl)
+                est_pl = 0.0
 
         # Always emit TRADE_RESULT so dashboard/analytics have a row regardless
         logger.info(
