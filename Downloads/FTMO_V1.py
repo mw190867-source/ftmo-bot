@@ -1040,7 +1040,7 @@ XAUUSD_REGIME_PARAMS = {
         "pullback_enabled": True,     # Re-enable pullbacks in corrective mode
         "score_min_pullback": 5,      # But require strong confluence
         "require_sweep": True,        # MANDATORY: sweep must precede BOS
-        "claude_gate": "hard",        # Claude is a hard gate — block means no trade
+        "claude_gate": "shadow",  # V5.4 temp — credits exhausted, reverting to shadow until topped up
         "sl_pips": 20,               # Wider SL for noisy conditions
         "min_rr": 2.0,               # Higher RR required to compensate
         "max_session_range_pct": 0.7, # Block if price already moved >70% of typical range
