@@ -29,6 +29,39 @@ init(autoreset=True)
 # Then ftmo restart to restore full hard gate protection on gold
 
 # =========================
+# PHOENIX TELEMETRY (passive, best-effort, observe-only)
+# =========================
+_PHOENIX_URL     = "http://127.0.0.1:8000/events"
+_PHOENIX_TIMEOUT = 1.0  # hard cap — never delays trading
+
+def _phoenix_emit(event_type: str, symbol: str, message: str,
+                  severity: str = "INFO", department: str = "TRADE",
+                  metadata: dict = None) -> None:
+    """Fire-and-forget telemetry to Phoenix. Silently dropped on any failure."""
+    import threading as _th, json as _j, uuid as _uuid, urllib.request as _ur
+    def _send():
+        try:
+            body = _j.dumps({
+                "event_id":      str(_uuid.uuid4()),
+                "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+                "severity":      severity,
+                "department":    department,
+                "desk":          "DESK_ALPHA",
+                "bot_id":        "BOT_FXG_01",
+                "account_id":    "FTMO_001",
+                "symbol":        symbol,
+                "event_type":    event_type,
+                "message":       message,
+                "metadata":      metadata or {},
+            }, default=str).encode()
+            req = _ur.Request(_PHOENIX_URL, data=body,
+                              headers={"Content-Type": "application/json"})
+            _ur.urlopen(req, timeout=_PHOENIX_TIMEOUT)
+        except Exception:
+            pass
+    _th.Thread(target=_send, daemon=True).start()
+
+# =========================
 # PATHS / LOGGING
 # =========================
 BASE_DIR = Path(__file__).resolve().parent
@@ -1206,6 +1239,11 @@ def classify_gold_regime(symbol="XAUUSD"):
         cp("GOLD_REGIME",
            f"[GOLD_REGIME] {symbol} | regime={new_regime} | h1_ema={h1_direction} | "
            f"h4_atr_ratio={h4_atr_ratio:.2f} | h4_crosses={h4_crosses}")
+        _phoenix_emit("REGIME_CHANGE", symbol,
+                      f"Gold regime: {new_regime} | h1={h1_direction} | atr_ratio={h4_atr_ratio:.2f}",
+                      severity="INFO", department="TRADE",
+                      metadata={"regime": new_regime, "h1_ema": h1_direction,
+                                "h4_atr_ratio": round(h4_atr_ratio, 2), "h4_crosses": h4_crosses})
 
     return new_regime
 
@@ -1570,6 +1608,11 @@ def check_daily_drawdown():
         )
         logger.warning("DAILY DD STOP | %.2f%% | open=%.2f | now=%.2f",
                        drawdown * 100, daily_open_equity, acc.equity)
+        _phoenix_emit("DAILY_DD_WARNING", "ALL",
+                      f"Daily DD halt triggered | drawdown={drawdown*100:.2f}%",
+                      severity="CRITICAL", department="RISK",
+                      metadata={"drawdown_pct": round(drawdown * 100, 2),
+                                "open_equity": daily_open_equity, "current_equity": acc.equity})
         for pos in (mt5.positions_get() or []):
             if pos.magic == MAGIC:
                 close_position(pos, "DAILY_DD_STOP")
@@ -3464,6 +3507,14 @@ def execute_trade(symbol, direction, meta):
             "atr_open":  meta.get("atr"),
             "shadow_verdict": "pending",
         }
+        _phoenix_emit("TRADE_OPEN", symbol,
+                      f"{direction} {symbol} | entry={actual_entry:.5f} | ticket={result.order}",
+                      severity="INFO", department="TRADE",
+                      metadata={"ticket": result.order, "direction": direction,
+                                "entry": actual_entry, "sl": sl, "tp": tp,
+                                "lot": lot, "rr": rr, "entry_mode": entry_mode,
+                                "score": meta.get("score", 0),
+                                "session": open_trades[result.order]["session"]})
         # Claude shadow evaluation — fire-and-forget, never blocks
         _claude_shadow_evaluate(symbol, direction, entry_mode, int(meta.get("score", 0)),
                                 meta, utc_dt, atr, sl_dist, ticket=result.order)
@@ -3480,6 +3531,10 @@ def execute_trade(symbol, direction, meta):
             logger.warning("[ORDER_FAIL] %s | retcode=%d", symbol, result.retcode)
         _gate_hit(symbol, "order_fail")
         log_order_result(result, "open_trade")
+        _phoenix_emit("ORDER_REJECTED", symbol,
+                      f"Order failed {symbol} | retcode={getattr(result, 'retcode', 'none')}",
+                      severity="WARNING", department="TRADE",
+                      metadata={"retcode": getattr(result, "retcode", None), "direction": direction})
 
 # =========================
 # TRADE MANAGEMENT
@@ -3813,6 +3868,13 @@ def _finalise_close(ticket, known_symbol, deal, meta=None):
         except Exception as _e:
             logger.debug("[TRADE_RESULT] log failed: %s", _e)
         _shadow_csv_fill_outcome(ticket, float(getattr(deal, "price", 0) or 0), profit, r_multiple)
+        _phoenix_emit("TRADE_CLOSE", symbol,
+                      f"CLOSE {symbol} | ticket={ticket} | P/L={profit:.2f} | {r_multiple}R",
+                      severity="INFO", department="TRADE",
+                      metadata={"ticket": ticket, "profit": profit, "r_multiple": r_multiple,
+                                "close_reason": reason_s, "shadow_verdict": shadow_v,
+                                "entry_mode": meta.get("entry_mode", "?"),
+                                "direction": meta.get("type", "?")})
         _pl_icon = "🟢" if profit >= 0 else "🔴"
         tg_send(
             f"{_pl_icon} <b>CLOSE</b> {symbol} | {comment or reason_s}\n"
@@ -4093,8 +4155,11 @@ def log_heartbeat():
         except Exception as e:
             logger.error("Failed to write heartbeat file: %s", e)
         
+        _phoenix_emit("HEARTBEAT", "ALL", heartbeat_msg,
+                      severity="INFO", department="SYSTEM",
+                      metadata={"uptime": uptime_str, "open_trades": len(open_trades)})
         last_heartbeat_log_utc = now_utc
-    
+
     # Telegram status every hour
     if last_telegram_heartbeat_utc is None or (now_utc - last_telegram_heartbeat_utc).total_seconds() >= TELEGRAM_HEARTBEAT_INTERVAL_SEC:
         try:
@@ -4699,6 +4764,13 @@ logger.info("%s %s | session gate in signal engine | mgmt defaults False | BE 1-
 bot_start_time_utc = datetime.utcnow().replace(tzinfo=pytz.UTC)
 last_heartbeat_utc = bot_start_time_utc
 logger.info("[STARTUP] Bot monitoring initialized | start_time=%s", bot_start_time_utc.strftime('%Y-%m-%d %H:%M:%S UTC'))
+_phoenix_emit("BOT_START", "ALL",
+              f"Bot started | version={BOT_VERSION} | symbols={','.join(SYMBOLS)}",
+              severity="INFO", department="SYSTEM",
+              metadata={"bot_name": BOT_NAME, "bot_version": BOT_VERSION,
+                        "symbols": SYMBOLS, "magic": MAGIC,
+                        "risk_pct": RISK_PERCENT, "dd_limit": DAILY_DRAWDOWN_LIMIT,
+                        "start_time": bot_start_time_utc.isoformat()})
 
 for s in SYMBOLS:
     ensure_symbol(s)
