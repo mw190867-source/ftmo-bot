@@ -23,6 +23,11 @@ from opportunity_scanner import (
 
 init(autoreset=True)
 
+# TODO: Top up Anthropic API credits — Friday morning 00:01 BST
+# XAUUSD CORRECTIVE claude_gate is currently set to "shadow" instead of "hard"
+# Revert XAUUSD_REGIME_PARAMS CORRECTIVE claude_gate back to "hard" after topping up
+# Then ftmo restart to restore full hard gate protection on gold
+
 # =========================
 # PATHS / LOGGING
 # =========================
