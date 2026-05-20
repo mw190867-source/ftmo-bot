@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FTMO Challenge Bot — Dashboard</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/dist/tabler-icons.min.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #131922;
+    --panel-2: #1a2230;
+    --border: #232c3b;
+    --text: #e6edf3;
+    --muted: #7d8590;
+    --teal: #2dd4bf;
+    --teal-bg: rgba(45, 212, 191, 0.12);
+    --coral: #f87171;
+    --coral-bg: rgba(248, 113, 113, 0.12);
+    --purple: #a78bfa;
+    --purple-bg: rgba(167, 139, 250, 0.15);
+    --amber: #fbbf24;
+    --amber-bg: rgba(251, 191, 36, 0.12);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+  }
+  .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 24px; gap: 12px; flex-wrap: wrap;
+  }
+  .title { display: flex; align-items: center; gap: 12px; }
+  .title h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  .title .sub { color: var(--muted); font-size: 13px; }
+  .pulse-dot {
+    width: 10px; height: 10px; border-radius: 50%; background: var(--teal);
+    box-shadow: 0 0 0 0 rgba(45, 212, 191, 0.7);
+    animation: pulse 2s infinite;
+  }
+  .pulse-dot.offline { background: var(--coral); animation: none; }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(45, 212, 191, 0.7); }
+    70% { box-shadow: 0 0 0 8px rgba(45, 212, 191, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(45, 212, 191, 0); }
+  }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge {
+    padding: 4px 10px; border-radius: 6px; font-size: 12px;
+    border: 1px solid var(--border); background: var(--panel-2);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .badge.running { color: var(--teal); border-color: rgba(45, 212, 191, 0.3); background: var(--teal-bg); }
+  .badge.offline { color: var(--coral); border-color: rgba(248, 113, 113, 0.3); background: var(--coral-bg); }
+  .badge.purple { color: var(--purple); border-color: rgba(167, 139, 250, 0.3); background: var(--purple-bg); }
+
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  @media (max-width: 1024px) { .grid-4 { grid-template-columns: repeat(2, 1fr); } .grid-2 { grid-template-columns: 1fr; } }
+  @media (max-width: 600px) { .grid-4 { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+  }
+  .card-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px; gap: 8px;
+  }
+  .card-title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
+  .card-title .ti { color: var(--muted); font-size: 18px; }
+  .metric-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .metric-value { font-size: 28px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+  .metric-sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .pos { color: var(--teal); }
+  .neg { color: var(--coral); }
+  .flat { color: var(--muted); }
+
+  .pos-row {
+    border-top: 1px solid var(--border); padding: 12px 0;
+  }
+  .pos-row:first-child { border-top: none; padding-top: 0; }
+  .pos-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+  .pos-sym { color: var(--coral); font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+  .chip {
+    padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500;
+    background: var(--panel-2); border: 1px solid var(--border);
+  }
+  .chip.mode { color: var(--purple); background: var(--purple-bg); border-color: rgba(167, 139, 250, 0.3); }
+  .chip.buy { color: var(--teal); background: var(--teal-bg); border-color: rgba(45, 212, 191, 0.3); }
+  .chip.sell { color: var(--coral); background: var(--coral-bg); border-color: rgba(248, 113, 113, 0.3); }
+  .chip.approve { color: var(--teal); background: var(--teal-bg); border-color: rgba(45, 212, 191, 0.3); }
+  .chip.block { color: var(--coral); background: var(--coral-bg); border-color: rgba(248, 113, 113, 0.3); }
+  .chip.reduce, .chip.approve_reduced { color: var(--amber); background: var(--amber-bg); border-color: rgba(251, 191, 36, 0.3); }
+  .chip.purple { color: var(--purple); background: var(--purple-bg); border-color: rgba(167, 139, 250, 0.3); }
+  .chip.ok { color: var(--teal); background: var(--teal-bg); border-color: rgba(45, 212, 191, 0.3); }
+  .chip.warn { color: var(--amber); background: var(--amber-bg); border-color: rgba(251, 191, 36, 0.3); }
+  .chip.pending { color: var(--muted); background: rgba(125, 133, 144, 0.08); border-color: rgba(125, 133, 144, 0.2); }
+
+  .pos-prices { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-top: 4px; color: var(--muted); }
+  .pos-prices .label { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+  .pos-prices .val { color: var(--text); font-size: 13px; }
+
+  .progress-track {
+    height: 4px; background: var(--panel-2); border-radius: 2px; margin: 8px 0; position: relative; overflow: hidden;
+  }
+  .progress-fill { height: 100%; background: var(--teal); border-radius: 2px; transition: width 0.3s; }
+  .progress-fill.neg { background: var(--coral); }
+  .pos-meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+
+  .claude-row { border-top: 1px solid var(--border); padding: 12px 0; }
+  .claude-row:first-child { border-top: none; padding-top: 0; }
+  .claude-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .claude-time { margin-left: auto; color: var(--muted); font-size: 12px; }
+  .claude-reason { color: var(--text); font-size: 13px; line-height: 1.4; margin-bottom: 6px; }
+  .claude-conf { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--muted); }
+  .conf-bar { flex: 1; height: 3px; background: var(--panel-2); margin: 0 8px; border-radius: 2px; }
+  .conf-fill { height: 100%; background: var(--purple); border-radius: 2px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 10px; border-bottom: 1px solid var(--border); font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  td.sym { color: var(--coral); font-weight: 600; }
+  .match-yes { color: var(--teal); }
+  .match-no { color: var(--coral); }
+
+  .gates-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .gate-row {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12px;
+  }
+  .gate-sym { font-family: 'JetBrains Mono', monospace; color: var(--coral); font-weight: 600; }
+
+  /* V4 Regime details */
+  .regime-row {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; padding: 3px 0;
+  }
+  .regime-label { color: var(--muted); }
+  .regime-value { font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+  .regime-value.dim { color: var(--muted); font-weight: 400; }
+  .sweep-indicator { transition: all 0.3s ease; }
+  .sweep-indicator.valid { background: rgba(45, 212, 191, 0.15) !important; border: 1px solid var(--teal); }
+
+  .empty { color: var(--muted); text-align: center; padding: 24px; font-style: italic; }
+  .scroll { max-height: 400px; overflow-y: auto; }
+  .scroll::-webkit-scrollbar { width: 6px; }
+  .scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  #equity-chart { max-height: 280px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="title">
+      <div class="pulse-dot" id="status-dot"></div>
+      <div>
+        <h1>FTMO Challenge Bot</h1>
+        <div class="sub" id="status-sub">Connecting…</div>
+      </div>
+    </div>
+    <div class="badges">
+      <span class="badge running" id="badge-status"><i class="ti ti-player-play"></i> <span>Running</span></span>
+      <span class="badge purple" id="badge-claude"><i class="ti ti-brain"></i> Claude: <span id="claude-state">ON</span></span>
+      <span class="badge"><i class="ti ti-coin"></i> <span id="symbol-count">4</span> symbols</span>
+    </div>
+  </header>
+
+  <!-- Top metrics -->
+  <div class="grid-4">
+    <div class="card">
+      <div class="metric-label">Account equity</div>
+      <div class="metric-value" id="m-equity">£—</div>
+      <div class="metric-sub" id="m-equity-sub">—</div>
+    </div>
+    <div class="card">
+      <div class="metric-label">FTMO progress</div>
+      <div class="metric-value pos" id="m-ftmo">—</div>
+      <div class="metric-sub" id="m-ftmo-sub">—</div>
+    </div>
+    <div class="card">
+      <div class="metric-label">Daily drawdown</div>
+      <div class="metric-value" id="m-dd">—</div>
+      <div class="metric-sub" id="m-dd-sub">—</div>
+    </div>
+    <div class="card">
+      <div class="metric-label">Open positions</div>
+      <div class="metric-value" id="m-open">—</div>
+      <div class="metric-sub" id="m-open-sub">—</div>
+    </div>
+    <div class="card" id="regime-card" style="display: none;">
+      <div class="metric-label">XAUUSD Regime <span id="regime-badge" class="chip">CORRECTIVE</span></div>
+      <div class="metric-value" id="m-regime" style="font-size: 18px;">—</div>
+      <div class="metric-sub" id="m-regime-sub">—</div>
+      <!-- V4 Regime Details -->
+      <div class="regime-details" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);">
+        <div class="regime-row">
+          <span class="regime-label">H1 EMA</span>
+          <span id="regime-h1-ema" class="regime-value">NEUTRAL</span>
+        </div>
+        <div class="regime-row">
+          <span class="regime-label">H4 ATR Ratio</span>
+          <span id="regime-atr-ratio" class="regime-value">0.83</span>
+        </div>
+        <div class="regime-row">
+          <span class="regime-label">H4 Oscillation</span>
+          <span id="regime-h4-crosses" class="regime-value">3 crosses</span>
+        </div>
+        <div class="regime-row">
+          <span class="regime-label">Last Update</span>
+          <span id="regime-last-update" class="regime-value dim">—</span>
+        </div>
+      </div>
+      <!-- Sweep Status Indicator -->
+      <div class="sweep-indicator" style="margin-top: 12px; padding: 8px 10px; border-radius: 6px; background: var(--panel-2);">
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
+          <span id="sweep-dot" style="width: 8px; height: 8px; border-radius: 50%; background: var(--muted);"></span>
+          <span id="sweep-text">No sweep detected</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Economic Calendar Strip -->
+  <div class="card" id="calendar-card" style="margin-top: 16px; display: none;">
+    <div style="display: flex; align-items: center; gap: 12px; padding: 12px 16px; flex-wrap: wrap;">
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <span class="ti ti-calendar-event" style="color: var(--accent-amber);"></span>
+        <span class="metric-label" style="font-size: 12px;">USD Economic Events</span>
+      </div>
+      <div id="calendar-events" style="display: flex; gap: 16px; flex-wrap: wrap; flex: 1;">
+        <!-- Events injected here -->
+      </div>
+      <div id="calendar-meta" class="metric-sub" style="font-size: 11px;">—</div>
+    </div>
+  </div>
+
+  <!-- Opportunity Scanner -->
+  <div class="card" id="opportunities-card" style="margin-top: 16px;">
+    <div class="card-head">
+      <div class="card-title"><i class="ti ti-radar"></i> Claude Opportunity Scanner</div>
+      <span class="metric-sub" id="opportunities-summary">—</span>
+    </div>
+    <div id="opportunities-body" style="padding: 12px 16px;">
+      <div class="empty">No opportunities detected</div>
+    </div>
+  </div>
+
+  <!-- Open positions + Claude decisions -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title"><i class="ti ti-target"></i> Open positions</div>
+        <span class="metric-sub" id="open-summary">—</span>
+      </div>
+      <div id="positions-body" class="scroll">
+        <div class="empty">No open positions</div>
+      </div>
+      <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;">
+      <div class="card-head" style="margin-bottom: 8px;">
+        <div class="card-title"><i class="ti ti-filter-x"></i> Rejected signals</div>
+        <span class="metric-sub" id="rejected-summary">—</span>
+      </div>
+      <div id="rejected-body" class="scroll" style="max-height: 240px; overflow-y: auto;">
+        <div class="empty">No recent rejections</div>
+      </div>
+      <hr style="border: none; border-top: 1px solid var(--border); margin: 16px 0;">
+      <div class="card-title" style="margin-bottom: 10px;"><i class="ti ti-shield-check"></i> Signal gates — current status</div>
+      <div class="gates-grid" id="gates-body">
+        <div class="empty">No gate data</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title"><i class="ti ti-brain"></i> Claude decisions</div>
+        <span class="badge purple"><span id="shadow-mode">shadow mode — observing</span></span>
+      </div>
+      <div id="claude-body" class="scroll">
+        <div class="empty">No Claude decisions yet</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Equity chart -->
+  <div class="card" style="margin-bottom: 24px;">
+    <div class="card-head">
+      <div class="card-title"><i class="ti ti-chart-line"></i> Equity — Challenge</div>
+      <span class="metric-sub">net of commissions</span>
+    </div>
+    <canvas id="equity-chart"></canvas>
+  </div>
+
+  <!-- Closed trades -->
+  <div class="card" style="margin-bottom: 24px;">
+    <div class="card-head">
+      <div class="card-title"><i class="ti ti-history"></i> Recent closed trades</div>
+      <span class="metric-sub" id="trades-summary">—</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Symbol</th><th>Dir</th><th>Mode</th><th>P/L</th>
+          <th>Close reason</th><th>Claude said</th><th>Match</th><th>Time</th>
+        </tr>
+      </thead>
+      <tbody id="trades-body">
+        <tr><td colspan="8" class="empty">No closed trades yet</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Bottom metrics -->
+  <div class="grid-4">
+    <div class="card">
+      <div class="metric-label">Gross P/L today</div>
+      <div class="metric-value" id="m-gross">—</div>
+    </div>
+    <div class="card">
+      <div class="metric-label">Commission drag</div>
+      <div class="metric-value neg" id="m-commission">—</div>
+      <div class="metric-sub" id="m-commission-sub">—</div>
+    </div>
+    <div class="card">
+      <div class="metric-label">Net P/L today</div>
+      <div class="metric-value" id="m-net">—</div>
+      <div class="metric-sub" id="m-net-sub">—</div>
+    </div>
+    <div class="card">
+      <div class="metric-label">Claude accuracy</div>
+      <div class="metric-value" id="m-claude">—</div>
+      <div class="metric-sub" id="m-claude-sub">—</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = location.origin.includes(':5001') ? '' : 'http://localhost:5001';
+const POLL_MS = 3000;
+let equityChart = null;
+const equityHistory = []; // {t, equity}
+
+function fmtMoney(v, sign = false) {
+  if (v == null || isNaN(v)) return '£—';
+  const s = sign && v > 0 ? '+' : '';
+  return s + '£' + Math.abs(v).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).replace(/^/, v < 0 ? '-' : '');
+}
+function fmtPrice(v) { return v == null ? '—' : v.toFixed(5); }
+function clsPL(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat'; }
+function fmtTime(iso) {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }); }
+  catch { return '—'; }
+}
+
+async function fetchJSON(path) {
+  try {
+    const r = await fetch(API + path, { cache: 'no-store' });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+function setOffline() {
+  document.getElementById('status-dot').classList.add('offline');
+  document.getElementById('status-sub').textContent = 'Bot offline — API unreachable';
+  const b = document.getElementById('badge-status');
+  b.classList.remove('running'); b.classList.add('offline');
+  b.querySelector('span').textContent = 'Offline';
+}
+function setOnline(sub) {
+  document.getElementById('status-dot').classList.remove('offline');
+  document.getElementById('status-sub').textContent = sub;
+  const b = document.getElementById('badge-status');
+  b.classList.add('running'); b.classList.remove('offline');
+  b.querySelector('span').textContent = 'Running';
+}
+
+function renderStatus(s) {
+  if (!s) { setOffline(); return; }
+  if (s.bot_alive) {
+    const age = s.heartbeat_age_minutes;
+    const startStr = s.bot_start_utc ? new Date(s.bot_start_utc).toLocaleTimeString('en-GB') : '—';
+    setOnline(`Heartbeat: ${age != null ? age.toFixed(1) + 'm ago' : 'unknown'} · Started ${startStr}`);
+  } else {
+    setOffline();
+  }
+  document.getElementById('claude-state').textContent = s.claude_enabled ? 'ON' : 'OFF';
+  document.getElementById('symbol-count').textContent = (s.symbols || []).length;
+}
+
+function renderAccount(a) {
+  if (!a || !a.available) {
+    document.getElementById('m-equity').textContent = '£—';
+    document.getElementById('m-equity-sub').textContent = 'MT5 unavailable';
+    return;
+  }
+  document.getElementById('m-equity').textContent = '£' + a.equity.toLocaleString('en-GB', { minimumFractionDigits: 2 });
+  const sub = document.getElementById('m-equity-sub');
+  sub.className = 'metric-sub ' + clsPL(a.daily_pnl);
+  sub.textContent = (a.daily_pnl >= 0 ? '+' : '') + '£' + a.daily_pnl.toFixed(2) + ' today';
+
+  const ftmoEl = document.getElementById('m-ftmo');
+  ftmoEl.className = 'metric-value ' + clsPL(a.ftmo_pct);
+  ftmoEl.textContent = (a.ftmo_pct >= 0 ? '+' : '') + a.ftmo_pct.toFixed(2) + '%';
+  document.getElementById('m-ftmo-sub').textContent =
+    `of ${a.ftmo_target_pct.toFixed(0)}% · £${a.ftmo_pnl.toFixed(0)} / £${a.ftmo_target_amount.toFixed(0)}`;
+
+  const ddEl = document.getElementById('m-dd');
+  ddEl.className = 'metric-value ' + (a.daily_dd_pct > 3 ? 'neg' : a.daily_dd_pct > 0 ? 'flat' : 'pos');
+  ddEl.textContent = a.daily_dd_pct.toFixed(2) + '%';
+  document.getElementById('m-dd-sub').textContent = `limit: ${a.daily_dd_limit_pct.toFixed(2)}%`;
+
+  // Track equity history
+  const now = Date.now();
+  if (equityHistory.length === 0 || now - equityHistory[equityHistory.length - 1].t > 30000) {
+    equityHistory.push({ t: now, equity: a.equity });
+    if (equityHistory.length > 200) equityHistory.shift();
+    renderEquityChart(a.challenge_start_equity);
+  }
+}
+
+function renderPositions(p) {
+  const positions = (p && p.positions) || [];
+  const body = document.getElementById('positions-body');
+  document.getElementById('m-open').textContent = positions.length;
+  const totalFloat = positions.reduce((s, x) => s + x.pl, 0);
+  const sub = document.getElementById('m-open-sub');
+  sub.className = 'metric-sub ' + clsPL(totalFloat);
+  sub.textContent = positions.length ? `${totalFloat >= 0 ? '+' : ''}£${totalFloat.toFixed(2)} floating` : 'none';
+  document.getElementById('open-summary').textContent = `${positions.length} open`;
+
+  if (!positions.length) {
+    body.innerHTML = '<div class="empty">No open positions</div>';
+    return;
+  }
+  body.innerHTML = positions.map(p => {
+    const dirCls = p.direction === 'BUY' ? 'buy' : 'sell';
+    const pct = Math.max(0, Math.min(100, ((p.r_progress || 0) / 1.5) * 100));
+    const plCls = clsPL(p.pl);
+    const shadow = p.shadow_verdict || '—';
+    const shadowCls = shadow === 'approve' ? 'approve' : shadow === 'block' ? 'block' : shadow === 'approve_reduced' ? 'approve_reduced' : shadow === 'pending' ? 'pending' : '';
+    return `
+      <div class="pos-row">
+        <div class="pos-head">
+          <span class="pos-sym">${p.symbol}</span>
+          <span class="chip mode">${(p.entry_mode || '?').toUpperCase()}</span>
+          <span class="chip ${dirCls}">${p.direction}</span>
+          <span style="margin-left: auto;" class="${plCls}">${p.pl >= 0 ? '+' : ''}£${p.pl.toFixed(2)}</span>
+          <span class="metric-sub">${(p.r_progress || 0).toFixed(2)}R</span>
+        </div>
+        <div class="pos-prices">
+          <div><div class="label">SL</div><div class="val">${fmtPrice(p.sl)}</div></div>
+          <div><div class="label">Entry</div><div class="val">${fmtPrice(p.entry)}</div></div>
+          <div><div class="label">TP</div><div class="val">${fmtPrice(p.tp)}</div></div>
+        </div>
+        <div class="progress-track"><div class="progress-fill ${p.pl < 0 ? 'neg' : ''}" style="width: ${pct}%"></div></div>
+        <div class="pos-meta">
+          <span>Ticket: ${p.ticket} · Lot: ${p.lot}</span>
+          <span class="chip ${shadowCls}">Claude: ${shadow}${p.shadow_confidence ? ' ' + p.shadow_confidence.toFixed(2) : ''}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderClaude(c) {
+  const decisions = (c && c.decisions) || [];
+  const modeText = c && c.enabled ? 'shadow + hard gate mode active' : 'disabled — no API key';
+  document.getElementById('shadow-mode').textContent = modeText;
+  const body = document.getElementById('claude-body');
+  if (!decisions.length) {
+    body.innerHTML = '<div class="empty">No Claude decisions yet</div>';
+    return;
+  }
+  body.innerHTML = decisions.map(d => {
+    const dirCls = d.direction === 'BUY' ? 'buy' : 'sell';
+    const verdict = d.verdict || 'unknown';
+    // Color: green=approved, red=blocked, amber=approve_reduced or partial
+    const verdictCls = verdict === 'APPROVED' || verdict === 'approve' ? 'ok' :
+                       verdict === 'BLOCKED' || verdict === 'block' ? 'block' :
+                       verdict === 'pending' || verdict === 'PENDING' ? 'pending' : 'warn';
+    const gateType = d.gate_type || 'shadow';
+    const gateTypeCls = gateType === 'hard' ? 'coral' : 'muted'; // Highlight hard gates
+    const conf = (d.confidence || 0) * 100;
+    return `
+      <div class="claude-row">
+        <div class="claude-head">
+          <span class="pos-sym">${d.symbol}</span>
+          <span class="chip ${gateTypeCls}" style="font-size: 10px; padding: 2px 6px;">${gateType.toUpperCase()}</span>
+          <span class="chip ${dirCls}">${d.direction}</span>
+          <span class="chip ${verdictCls}">${verdict.toUpperCase()}</span>
+          <span class="claude-time">${fmtTime(d.ts)}</span>
+        </div>
+        <div class="claude-reason">${escapeHtml(d.reason || '')}</div>
+        <div class="claude-conf">
+          <span>confidence</span>
+          <div class="conf-bar"><div class="conf-fill" style="width: ${conf}%; background: ${verdictCls === 'ok' ? 'var(--teal)' : verdictCls === 'block' ? 'var(--coral)' : verdictCls === 'pending' ? 'var(--muted)' : 'var(--amber)'}"></div></div>
+          <span>${conf.toFixed(0)}%</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderTrades(t) {
+  const trades = (t && t.trades) || [];
+  const body = document.getElementById('trades-body');
+  const today = (t && t.today) || {};
+  document.getElementById('trades-summary').textContent =
+    today.count != null ? `today: ${today.count} trades · net ${today.net_pl >= 0 ? '+' : ''}£${today.net_pl.toFixed(2)}` : '—';
+
+  if (!trades.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty">No closed trades yet</td></tr>';
+  } else {
+    body.innerHTML = trades.map(tr => {
+      const plCls = clsPL(tr.pl);
+      const verdict = tr.shadow_verdict || '—';
+      const verdictCls = verdict === 'approve' ? 'approve' : verdict === 'block' ? 'block' : verdict === 'approve_reduced' ? 'approve_reduced' : verdict === 'pending' ? 'pending' : '';
+      const match = tr.claude_correct === true ? '<span class="match-yes">✓</span>' : tr.claude_correct === false ? '<span class="match-no">✗</span>' : '<span class="flat">—</span>';
+      return `
+        <tr>
+          <td class="sym">${tr.symbol}</td>
+          <td>${tr.direction || '—'}</td>
+          <td><span class="chip mode">${tr.entry_mode || '?'}</span></td>
+          <td class="${plCls}">${tr.pl >= 0 ? '+' : ''}£${tr.pl.toFixed(2)}</td>
+          <td>${escapeHtml(tr.reason || '—')}</td>
+          <td><span class="chip ${verdictCls}">${verdict}</span></td>
+          <td>${match}</td>
+          <td>${fmtTime(tr.closed_at)}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  // Bottom metrics
+  if (today.gross_pl != null) {
+    const gross = document.getElementById('m-gross');
+    gross.className = 'metric-value ' + clsPL(today.gross_pl);
+    gross.textContent = (today.gross_pl >= 0 ? '+' : '') + '£' + today.gross_pl.toFixed(2);
+
+    document.getElementById('m-commission').textContent = '-£' + today.commission.toFixed(2);
+    document.getElementById('m-commission-sub').textContent = today.count + ' trades';
+
+    const net = document.getElementById('m-net');
+    net.className = 'metric-value ' + clsPL(today.net_pl);
+    net.textContent = (today.net_pl >= 0 ? '+' : '') + '£' + today.net_pl.toFixed(2);
+
+    const claude = document.getElementById('m-claude');
+    claude.textContent = today.claude_total ? `${today.claude_correct} / ${today.claude_total}` : '—';
+    document.getElementById('m-claude-sub').textContent =
+      today.claude_total ? `${today.claude_total - today.claude_correct} disagree` : 'no judged trades';
+  }
+}
+
+function renderGates(g) {
+  const gates = (g && g.gates) || {};
+  const body = document.getElementById('gates-body');
+  const symbols = ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY'];
+  const rows = symbols.map(s => {
+    const info = gates[s] || {};
+    let last = info.current_last_gate;
+    const top3 = info.top_3_reasons || [];
+    const v4 = info.v4_gates; // Only for XAUUSD
+
+    // Fallback: if no recent gate but we have top3 stats, use the most frequent as "current"
+    if (!last && top3.length > 0) {
+      last = top3[0].reason;
+    }
+
+    const lastCls = !last ? 'ok' : last === 'session_gate' ? 'warn' : 'block';
+
+    // Build top 3 reasons display
+    const top3Html = top3.length > 0
+      ? `<div style="margin-top: 6px; font-size: 11px; color: var(--muted);">
+           <span style="color: var(--text-secondary);">Top gates (2h): </span>
+           ${top3.map(t => `<span style="margin-right: 8px;">${t.reason}: ${t.count}</span>`).join('')}
+         </div>`
+      : '';
+
+    // Build V4-specific gates for XAUUSD
+    let v4Html = '';
+    if (s === 'XAUUSD' && v4) {
+      const v4Entries = Object.entries(v4).filter(([_, count]) => count > 0);
+      if (v4Entries.length > 0) {
+        v4Html = `<div style="margin-top: 6px; font-size: 11px;">
+                    <span style="color: var(--accent-coral); font-weight: 600;">V4: </span>
+                    ${v4Entries.map(([name, count]) =>
+                      `<span class="chip warn" style="font-size: 10px; padding: 2px 6px; margin-right: 4px;">${name}: ${count}</span>`
+                    ).join('')}
+                  </div>`;
+      }
+    }
+
+    return `<div class="gate-row">
+      <div class="gate-sym">${s}</div>
+      <div style="margin-top: 4px;">
+        ${last ? `<span class="chip ${lastCls}">${last}</span>` : '<span class="chip ok">passing</span>'}
+      </div>
+      ${top3Html}
+      ${v4Html}
+    </div>`;
+  });
+  body.innerHTML = rows.join('');
+}
+
+// Chart colours: teal when above challenge start, red when below.
+const EQ_TEAL_BORDER = '#2dd4bf';
+const EQ_TEAL_FILL   = 'rgba(45, 212, 191, 0.12)';
+const EQ_RED_BORDER  = '#f87171';
+const EQ_RED_FILL    = 'rgba(248, 113, 113, 0.12)';
+
+function renderEquityChart(startEq) {
+  const ctx = document.getElementById('equity-chart').getContext('2d');
+  const labels = equityHistory.map(p => new Date(p.t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }));
+  const data = equityHistory.map(p => p.equity);
+
+  // Build a flat reference line at challenge start equity (same length as data points).
+  const refData = (startEq != null && data.length) ? data.map(() => startEq) : [];
+
+  // Determine current pass/fail state based on the latest equity point.
+  const latest = data.length ? data[data.length - 1] : null;
+  const aboveStart = (startEq == null || latest == null) ? true : (latest >= startEq);
+  const borderColor = aboveStart ? EQ_TEAL_BORDER : EQ_RED_BORDER;
+  const backgroundColor = aboveStart ? EQ_TEAL_FILL : EQ_RED_FILL;
+
+  if (!equityChart) {
+    equityChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Equity',
+            data,
+            borderColor,
+            backgroundColor,
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0,
+            borderWidth: 2,
+            order: 1,
+          },
+          {
+            // Horizontal dashed reference line at the true challenge start.
+            label: 'Challenge start',
+            data: refData,
+            borderColor: 'rgba(220, 220, 220, 0.55)',
+            borderDash: [6, 4],
+            borderWidth: 1.25,
+            fill: false,
+            pointRadius: 0,
+            tension: 0,
+            order: 0,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: c => {
+                if (c.datasetIndex === 1) return 'Challenge start: £' + c.parsed.y.toFixed(2);
+                return '£' + c.parsed.y.toFixed(2);
+              }
+            }
+          },
+        },
+        scales: {
+          x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#7d8590' } },
+          y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#7d8590', callback: v => '£' + v.toLocaleString() } },
+        },
+      },
+    });
+  } else {
+    equityChart.data.labels = labels;
+    equityChart.data.datasets[0].data = data;
+    equityChart.data.datasets[0].borderColor = borderColor;
+    equityChart.data.datasets[0].backgroundColor = backgroundColor;
+    equityChart.data.datasets[1].data = refData;
+    equityChart.update('none');
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function renderRegime(data) {
+  const card = document.getElementById('regime-card');
+  const badge = document.getElementById('regime-badge');
+  const value = document.getElementById('m-regime');
+  const sub = document.getElementById('m-regime-sub');
+
+  if (!data || data.regime === 'UNKNOWN' || data.regime === 'ERROR') {
+    card.style.display = 'none';
+    return;
+  }
+
+  card.style.display = '';
+  const regime = data.regime;
+  const h1Ema = data.h1_ema || 'NEUTRAL';
+  const atrRatio = data.h4_atr_ratio || 0;
+  const h4Crosses = data.h4_crosses || 0;
+  const minsSinceClass = data.minutes_since_classification;
+  const sweep = data.sweep || {};
+
+  // Color code the regime badge
+  badge.textContent = regime;
+  badge.className = 'chip';
+  if (regime === 'TRENDING') {
+    badge.classList.add('ok');
+    value.style.color = 'var(--teal)';
+  } else if (regime === 'CORRECTIVE') {
+    badge.classList.add('warn');
+    value.style.color = 'var(--amber)';
+  } else if (regime === 'COMPRESSION') {
+    badge.classList.add('block');
+    value.style.color = 'var(--coral)';
+  }
+
+  value.textContent = regime;
+
+  if (regime === 'TRENDING') {
+    sub.textContent = 'Breakout mode • Shadow gate';
+    sub.style.color = '';
+  } else if (regime === 'CORRECTIVE') {
+    sub.textContent = 'Pullback enabled • Sweep req • Hard gate';
+    sub.style.color = '';
+  } else if (regime === 'COMPRESSION') {
+    sub.textContent = 'Trading disabled — wait for expansion';
+    sub.style.color = 'var(--coral)';
+  } else {
+    sub.textContent = '';
+  }
+
+  // Update detailed metrics
+  const h1EmaEl = document.getElementById('regime-h1-ema');
+  const atrRatioEl = document.getElementById('regime-atr-ratio');
+  const h4CrossesEl = document.getElementById('regime-h4-crosses');
+  const lastUpdateEl = document.getElementById('regime-last-update');
+
+  if (h1EmaEl) {
+    h1EmaEl.textContent = h1Ema;
+    h1EmaEl.style.color = h1Ema === 'BULL' ? 'var(--teal)' : h1Ema === 'BEAR' ? 'var(--coral)' : 'var(--muted)';
+  }
+  if (atrRatioEl) {
+    atrRatioEl.textContent = atrRatio.toFixed(2);
+    atrRatioEl.style.color = atrRatio > 1.0 ? 'var(--teal)' : atrRatio < 0.7 ? 'var(--coral)' : 'var(--amber)';
+  }
+  if (h4CrossesEl) {
+    h4CrossesEl.textContent = `${h4Crosses} crosses`;
+    h4CrossesEl.style.color = h4Crosses >= 5 ? 'var(--amber)' : 'var(--muted)';
+  }
+  if (lastUpdateEl) {
+    if (minsSinceClass !== null) {
+      lastUpdateEl.textContent = `${minsSinceClass}m ago`;
+      lastUpdateEl.style.color = minsSinceClass > 35 ? 'var(--coral)' : 'var(--muted)';
+    } else {
+      lastUpdateEl.textContent = '—';
+    }
+  }
+
+  // Update sweep indicator
+  const sweepDot = document.getElementById('sweep-dot');
+  const sweepText = document.getElementById('sweep-text');
+
+  if (sweepDot && sweepText) {
+    if (sweep.sweep_valid && sweep.last_sweep_type) {
+      const dir = sweep.last_sweep_direction === 'BUY' ? '↓ Sweep Low' : '↑ Sweep High';
+      sweepDot.style.background = 'var(--teal)';
+      sweepText.textContent = `${dir} • ${sweep.minutes_ago}m ago (valid)`;
+      sweepText.style.color = 'var(--teal)';
+    } else if (sweep.last_sweep_type) {
+      const dir = sweep.last_sweep_direction === 'BUY' ? '↓ Sweep Low' : '↑ Sweep High';
+      sweepDot.style.background = 'var(--muted)';
+      sweepText.textContent = `${dir} • ${sweep.minutes_ago}m ago (expired)`;
+      sweepText.style.color = 'var(--muted)';
+    } else {
+      sweepDot.style.background = 'var(--muted)';
+      sweepText.textContent = 'No sweep detected (required for CORRECTIVE)';
+      sweepText.style.color = 'var(--muted)';
+    }
+  }
+}
+
+function renderCalendar(data) {
+  const card = document.getElementById('calendar-card');
+  const eventsEl = document.getElementById('calendar-events');
+  const metaEl = document.getElementById('calendar-meta');
+
+  if (!data || !data.events || data.events.length === 0) {
+    card.style.display = 'none';
+    return;
+  }
+
+  card.style.display = '';
+  const now = new Date();
+
+  // Filter to future events and those within last 2 hours
+  const relevantEvents = data.events.filter(e => {
+    const eventTime = new Date(e.datetime_utc || e.time);
+    const minsDiff = (eventTime - now) / 60000;
+    return minsDiff > -120; // Show events from past 2h to future
+  }).slice(0, 3); // Max 3 events
+
+  if (relevantEvents.length === 0) {
+    eventsEl.innerHTML = '<span class="metric-sub" style="font-size: 11px;">No upcoming high-impact events</span>';
+  } else {
+    eventsEl.innerHTML = relevantEvents.map(e => {
+      const eventTime = new Date(e.datetime_utc || e.time);
+      const minsDiff = Math.round((eventTime - now) / 60000);
+      const isSoon = minsDiff >= 0 && minsDiff <= 45;
+      const isPast = minsDiff < 0;
+      const timeStr = minsDiff > 0 ? `in ${minsDiff}m` : `${Math.abs(minsDiff)}m ago`;
+      const color = isSoon ? 'var(--amber)' : isPast ? 'var(--muted)' : 'var(--text)';
+
+      return `
+        <div style="display: flex; align-items: center; gap: 6px; font-size: 12px;">
+          <span style="width: 6px; height: 6px; border-radius: 50%; background: ${isSoon ? 'var(--amber)' : isPast ? 'var(--muted)' : 'var(--teal)'};"></span>
+          <span style="color: ${color}; font-weight: ${isSoon ? '600' : '400'};">${escapeHtml(e.title)}</span>
+          <span style="color: var(--muted);">${timeStr}</span>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // Meta: last fetch time
+  if (data.minutes_since_fetch !== null) {
+    metaEl.textContent = `Updated ${data.minutes_since_fetch}m ago`;
+    metaEl.style.color = data.minutes_since_fetch > 60 ? 'var(--coral)' : 'var(--muted)';
+  } else if (data.fetch_error) {
+    metaEl.textContent = 'Calendar fetch failed';
+    metaEl.style.color = 'var(--coral)';
+  } else {
+    metaEl.textContent = '—';
+  }
+}
+
+function renderRejected(data) {
+  const body = document.getElementById('rejected-body');
+  const summary = document.getElementById('rejected-summary');
+  const items = (data && data.items) || [];
+  const counts = (data && data.counts) || { total: 0, claude: 0, score: 0, structural: 0 };
+  summary.textContent = `Last ${counts.total} \u2014 ${counts.claude} Claude, ${counts.score} score, ${counts.structural} structural`;
+  if (items.length === 0) {
+    body.innerHTML = '<div class="empty">No recent rejections</div>';
+    return;
+  }
+  const reasonStyle = function(reason) {
+    if (reason === 'claude_hard_block' || reason === 'claude_htf_unknown') {
+      return { bg: 'rgba(150,100,200,0.15)', border: 'rgba(150,100,200,0.5)', label: reason.replace('_', ' ') };
+    }
+    if (reason === 'score_below') {
+      return { bg: 'rgba(230,180,60,0.12)', border: 'rgba(230,180,60,0.5)', label: 'score below' };
+    }
+    if (reason === 'candle_confirm' || reason === 'no_sweep') {
+      return { bg: 'rgba(140,140,150,0.10)', border: 'rgba(140,140,150,0.4)', label: reason.replace('_', ' ') };
+    }
+    if (reason === 'gbpjpy_shadow') {
+      return { bg: 'rgba(255,140,40,0.15)', border: 'rgba(255,140,40,0.5)', label: '\ud83d\udc7b SHADOW' };
+    }
+    return { bg: 'rgba(255,255,255,0.03)', border: 'var(--border)', label: reason };
+  };
+  const rows = items.map(function(r) {
+    const st = reasonStyle(r.reason);
+    let timeStr = '\u2014';
+    try {
+      const d = new Date(r.timestamp);
+      timeStr = d.toISOString().substr(11, 5) + ' UTC';
+    } catch (e) {}
+    const dirColor = r.direction === 'BUY' ? 'var(--accent-green)' : 'var(--coral)';
+    const conf = r.claude_confidence != null ? (r.claude_confidence * 100).toFixed(0) + '%' : '\u2014';
+    return '<tr style="background:' + st.bg + '; border-left: 3px solid ' + st.border + ';">' +
+      '<td style="padding:6px 10px; font-size:11px; color:var(--text-mute);">' + timeStr + '</td>' +
+      '<td style="padding:6px 10px; font-weight:600;">' + r.symbol + '</td>' +
+      '<td style="padding:6px 10px; color:' + dirColor + '; font-weight:600;">' + r.direction + '</td>' +
+      '<td style="padding:6px 10px; font-size:12px;">' + (r.mode || '\u2014') + '</td>' +
+      '<td style="padding:6px 10px; font-size:12px;">' + (r.score != null ? r.score : '\u2014') + '</td>' +
+      '<td style="padding:6px 10px; font-size:12px;">' + st.label + '</td>' +
+      '<td style="padding:6px 10px; font-size:12px; color:var(--text-mute);">' + conf + '</td>' +
+      '</tr>';
+  }).join('');
+  body.innerHTML = '<table style="width:100%; border-collapse:collapse;">' +
+    '<thead><tr style="text-align:left; color:var(--text-mute); font-size:10px; text-transform:uppercase;">' +
+      '<th style="padding:4px 10px;">Time</th>' +
+      '<th style="padding:4px 10px;">Symbol</th>' +
+      '<th style="padding:4px 10px;">Dir</th>' +
+      '<th style="padding:4px 10px;">Mode</th>' +
+      '<th style="padding:4px 10px;">Score</th>' +
+      '<th style="padding:4px 10px;">Reason</th>' +
+      '<th style="padding:4px 10px;">Claude</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function renderOpportunities(data) {
+  const body = document.getElementById('opportunities-body');
+  const summary = document.getElementById('opportunities-summary');
+  if (!data || Object.keys(data).length === 0) {
+    body.innerHTML = '<div class="empty">No opportunities detected</div>';
+    summary.textContent = '0 active';
+    return;
+  }
+  const entries = Object.entries(data).sort((a, b) => (b[1].confidence || 0) - (a[1].confidence || 0));
+  summary.textContent = entries.length + ' active';
+  body.innerHTML = entries.map(function(pair) {
+    var sym = pair[0], opp = pair[1];
+    var conf = opp.confidence || 0;
+    var confPct = (conf * 100).toFixed(0);
+    var confColor = conf >= 0.80 ? 'var(--accent-green)' : conf >= 0.65 ? 'var(--accent-amber)' : 'var(--text-mute)';
+    var dirColor = opp.direction === 'BUY' ? 'var(--accent-green)' : 'var(--coral)';
+    var age = opp.age_minutes != null ? opp.age_minutes + 'm ago' : '—';
+    return '<div style="border-left: 3px solid ' + confColor + '; padding: 10px 14px; margin-bottom: 10px; background: rgba(255,255,255,0.02); border-radius: 4px;">' +
+      '<div style="display: flex; align-items: center; gap: 12px; margin-bottom: 6px;">' +
+        '<span style="font-weight: 600; font-size: 14px;">' + sym + '</span>' +
+        '<span style="color: ' + dirColor + '; font-weight: 600;">' + (opp.direction || '?') + '</span>' +
+        '<span style="color: ' + confColor + '; font-weight: 600;">' + confPct + '%</span>' +
+        '<span class="metric-sub" style="font-size: 11px;">window ' + (opp.window_minutes || '?') + 'min · ' + age + '</span>' +
+      '</div>' +
+      '<div style="font-size: 13px; margin-bottom: 4px;"><b>Thesis:</b> ' + (opp.thesis || '—') + '</div>' +
+      '<div style="font-size: 13px; margin-bottom: 4px;"><b>Trigger:</b> ' + (opp.trigger || '—') + '</div>' +
+      (opp.caution ? '<div style="font-size: 12px; color: var(--text-mute);"><b>Caution:</b> ' + opp.caution + '</div>' : '') +
+      '</div>';
+  }).join('');
+}
+
+async function tick() {
+  const [status, account, positions, trades, claude, gates, regime, calendar, opportunities, rejected] = await Promise.all([
+    fetchJSON('/api/status'),
+    fetchJSON('/api/account'),
+    fetchJSON('/api/positions'),
+    fetchJSON('/api/trades'),
+    fetchJSON('/api/claude'),
+    fetchJSON('/api/gates'),
+    fetchJSON('/api/regime'),
+    fetchJSON('/api/calendar'),
+    fetchJSON('/api/opportunities'),
+    fetchJSON('/api/rejected'),
+  ]);
+  if (status === null && account === null) { setOffline(); return; }
+  renderStatus(status);
+  renderAccount(account);
+  renderPositions(positions);
+  renderClaude(claude);
+  renderTrades(trades);
+  renderGates(gates);
+  renderRegime(regime);
+  renderCalendar(calendar);
+  renderOpportunities(opportunities);
+  renderRejected(rejected);
+}
+
+tick();
+setInterval(tick, POLL_MS);
+</script>
+</body>
+</html>

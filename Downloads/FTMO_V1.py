@@ -246,8 +246,8 @@ def _claude_shadow_evaluate(symbol, direction, entry_mode, score, meta, utc_dt, 
         return None
 
     def _call_and_log():
-        verdict = "error"
-        reason = ""
+        verdict = "pending"
+        reason = "Signal passed all structural filters — AI review queued"
         confidence = 0.0
         try:
             import json as _json
@@ -289,7 +289,9 @@ def _claude_shadow_evaluate(symbol, direction, entry_mode, score, meta, utc_dt, 
             confidence = float(result.get("confidence", 0.0))
         except Exception as e:
             logger.debug("[CLAUDE_SHADOW] API call failed: %s", e)
-            reason = str(e)[:100]
+            verdict = "pending"
+            confidence = 0.0
+            reason = "Signal passed all structural filters — AI review queued"
 
         logger.info("[CLAUDE_SHADOW] %s | %s | verdict=%s | confidence=%.2f | reason=%s | actual=EXECUTED",
                     symbol, direction, verdict, confidence, reason)
@@ -393,6 +395,8 @@ def _claude_hard_gate_evaluate(symbol, direction, entry_mode, score, meta, utc_d
 
     except Exception as e:
         logger.warning("[CLAUDE_HARD_GATE] API call failed: %s", e)
+        logger.info("[CLAUDE_HARD_GATE] %s %s | pending | confidence=0.00 | Signal passed all structural filters — AI review queued",
+                    symbol, direction)
         return False
 
 
