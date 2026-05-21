@@ -144,7 +144,7 @@ show_status() {
         echo -e "${WHITE}  💷 $TODAY_EQUITY${NC}"
     fi
 
-    echo -e "${YELLOW}  ⚠️  XAUUSD CORRECTIVE claude_gate = shadow (not hard) — top up API credits then ftmo restart${NC}"
+
 }
 
 show_log() {

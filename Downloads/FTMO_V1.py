@@ -23,10 +23,6 @@ from opportunity_scanner import (
 
 init(autoreset=True)
 
-# TODO: Top up Anthropic API credits — Friday morning 00:01 BST
-# XAUUSD CORRECTIVE claude_gate is currently set to "shadow" instead of "hard"
-# Revert XAUUSD_REGIME_PARAMS CORRECTIVE claude_gate back to "hard" after topping up
-# Then ftmo restart to restore full hard gate protection on gold
 
 # =========================
 # PHOENIX TELEMETRY (passive, best-effort, observe-only)
@@ -1065,7 +1061,7 @@ XAUUSD_REGIME_PARAMS = {
         "pullback_enabled": True,     # Re-enable pullbacks in corrective mode
         "score_min_pullback": 5,      # But require strong confluence
         "require_sweep": True,        # MANDATORY: sweep must precede BOS
-        "claude_gate": "shadow",  # V5.4 temp — credits exhausted, reverting to shadow until topped up
+        "claude_gate": "hard",        # Claude is a hard gate — block means no trade
         "sl_pips": 20,               # Wider SL for noisy conditions
         "min_rr": 2.0,               # Higher RR required to compensate
         "max_session_range_pct": 0.7, # Block if price already moved >70% of typical range
