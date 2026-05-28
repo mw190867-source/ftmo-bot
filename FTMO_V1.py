@@ -23,6 +23,10 @@ from opportunity_scanner import (
 
 init(autoreset=True)
 
+# TODO: Top up Anthropic API credits — Friday morning 00:01 BST
+# XAUUSD CORRECTIVE claude_gate is currently set to "shadow" instead of "hard"
+# Revert XAUUSD_REGIME_PARAMS CORRECTIVE claude_gate back to "hard" after topping up
+# Then ftmo restart to restore full hard gate protection on gold
 
 # =========================
 # PHOENIX TELEMETRY (passive, best-effort, observe-only)
@@ -194,6 +198,9 @@ def _build_claude_context(symbol, direction, entry_mode, score, meta, utc_dt, at
     # Zone info
     zone_low = meta.get("zone_low")
     zone_high = meta.get("zone_high")
+    zone_width_atr_ratio = None
+    if zone_low is not None and zone_high is not None and atr and atr > 0:
+        zone_width_atr_ratio = round(abs(zone_high - zone_low) / atr, 3)
     # Last 5 M1 candles
     m1_rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 5)
     m1_candles = []
@@ -217,6 +224,18 @@ def _build_claude_context(symbol, direction, entry_mode, score, meta, utc_dt, at
     if session_losses:
         last_loss_ts = max(t for (t, _, _) in session_losses)
         time_since_last_loss = round((now_ts - last_loss_ts) / 60.0, 1)
+    # Session range position (0-1)
+    rates_60 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 60)
+    session_range_position = None
+    if rates_ok(rates_60, 60):
+        highs = [float(r["high"]) for r in rates_60]
+        lows = [float(r["low"]) for r in rates_60]
+        range_high = max(highs)
+        range_low = min(lows)
+        price = float(rates_60[-1]["close"])
+        if range_high > range_low:
+            session_range_position = round((price - range_low) / (range_high - range_low), 3)
+
     pip_val = float(c.get("pip_value", 0.0001))
     sl_pips_raw = round(sl_dist / pip_val, 1) if pip_val else None
     # Commodities and JPY pairs (pip_value=0.01) show in points not pips
@@ -237,12 +256,14 @@ def _build_claude_context(symbol, direction, entry_mode, score, meta, utc_dt, at
         "zone": {
             "low": zone_low,
             "high": zone_high,
+            "width_atr_ratio": zone_width_atr_ratio,
         },
         "last_5_m1_candles": m1_candles,
         "displacement": displacement,
         "bos_idx": bos_idx,
         "recent_losses_this_session": len(session_losses),
         "time_since_last_loss_minutes": time_since_last_loss,
+        "session_range_position": session_range_position,
         "sl_distance": sl_context,
     }
     return context
@@ -1061,7 +1082,7 @@ XAUUSD_REGIME_PARAMS = {
         "pullback_enabled": True,     # Re-enable pullbacks in corrective mode
         "score_min_pullback": 5,      # But require strong confluence
         "require_sweep": True,        # MANDATORY: sweep must precede BOS
-        "claude_gate": "hard",        # Claude is a hard gate — block means no trade
+        "claude_gate": "shadow",  # V5.4 temp — credits exhausted, reverting to shadow until topped up
         "sl_pips": 20,               # Wider SL for noisy conditions
         "min_rr": 2.0,               # Higher RR required to compensate
         "max_session_range_pct": 0.7, # Block if price already moved >70% of typical range
@@ -4847,13 +4868,3 @@ while True:
     _session_brief_check()
     run_opportunity_scan()
     time.sleep(5)
-
-# TODO: Post-challenge 3 — Implement ORB (Opening Range Breakout) strategy
-# - Build opening range capture function: first 15-30 min of London (08:00-08:15/08:30 BST) and NY (13:00-13:15/13:30 BST)
-# - Add range breakout detector: full candle body close beyond range high/low with momentum
-# - Add ORB score system: range size vs ATR, candle quality, HTF alignment, minimum range filter (> 0.5x ATR)
-# - Session-specific: only fire in 30-90 min window after range closes
-# - Correlation check: prevent simultaneous ORB + pullback on same symbol
-# - Backtest against challenge 2 and 3 data before going live
-# - Paper trade for one full challenge before live deployment
-# - Entry mode: "orb" alongside existing "pullback", "breakout", "continuation"
