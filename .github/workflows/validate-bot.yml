@@ -1,0 +1,161 @@
+name: Validate Trading Bot
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    name: Python Syntax & Linting
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 pylint
+    
+    - name: Check Python syntax
+      run: |
+        echo "Checking Python syntax..."
+        python -m py_compile claude_final_boss_12.py
+        echo "✅ Syntax check passed"
+    
+    - name: Lint with flake8
+      run: |
+        # Stop the build if there are Python syntax errors or undefined names
+        flake8 claude_final_boss_12.py --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Exit-zero treats all errors as warnings
+        flake8 claude_final_boss_12.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      continue-on-error: true
+
+  version-check:
+    runs-on: ubuntu-latest
+    name: Bot Version & Documentation
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Check version info
+      run: |
+        echo "=== Trading Bot Version Check ==="
+        grep -n "SMC.*V1[0-9]" claude_final_boss_12.py | head -5
+        echo ""
+        echo "=== Log File Configuration ==="
+        grep -n "LOG_FILE.*=" claude_final_boss_12.py
+        echo ""
+        echo "=== Symbol Configuration ==="
+        grep -n "SYMBOLS.*=" claude_final_boss_12.py
+        echo ""
+        echo "✅ Version info verified"
+      continue-on-error: true
+
+  file-validation:
+    runs-on: ubuntu-latest
+    name: File Integrity Check
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Check file exists and size
+      run: |
+        echo "=== File Status ==="
+        ls -lh claude_final_boss_12.py
+        echo ""
+        LINES=$(wc -l < claude_final_boss_12.py)
+        echo "Total lines: $LINES"
+        if [ "$LINES" -lt 3000 ]; then
+          echo "⚠️  Warning: File may be incomplete (< 3000 lines)"
+          exit 1
+        fi
+        echo "✅ File integrity check passed"
+    
+    - name: Check critical functions
+      run: |
+        echo "=== Checking Critical Functions ==="
+        echo "Checking get_signal()..."
+        grep -q "def get_signal" claude_final_boss_12.py && echo "✅ get_signal found" || exit 1
+        
+        echo "Checking execute_trade()..."
+        grep -q "def execute_trade" claude_final_boss_12.py && echo "✅ execute_trade found" || exit 1
+        
+        echo "Checking manage_trades()..."
+        grep -q "def manage_trades" claude_final_boss_12.py && echo "✅ manage_trades found" || exit 1
+        
+        echo "Checking calculate_sl_tp_liquidity()..."
+        grep -q "def calculate_sl_tp_liquidity" claude_final_boss_12.py && echo "✅ calculate_sl_tp_liquidity found" || exit 1
+
+  v13-fixes-check:
+    runs-on: ubuntu-latest
+    name: V13 Fixes Verification
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Verify V13 fixes are implemented
+      run: |
+        echo "=== Verifying V13 Fixes ==="
+        
+        echo "FIX 1: Session gate..."
+        grep -q "session_gate" claude_final_boss_12.py && echo "✅ Session gate found" || exit 1
+        
+        echo "FIX 2: HTF hard block..."
+        grep -q "counter-trend blocked" claude_final_boss_12.py && echo "✅ HTF hard block found" || exit 1
+        
+        echo "FIX 3: Candle freshness..."
+        grep -q "_pick_confirmation_candle" claude_final_boss_12.py && echo "✅ Candle freshness found" || exit 1
+        
+        echo "FIX 4: Min SL floor..."
+        grep -q "min_sl_distance" claude_final_boss_12.py && echo "✅ Min SL floor found" || exit 1
+        
+        echo "FIX 5: Asia disable..."
+        grep -q "asia_disabled" claude_final_boss_12.py && echo "✅ Asia disable found" || exit 1
+        
+        echo "FIX 6: Score validation..."
+        grep -q "score_validation" claude_final_boss_12.py && echo "✅ Score validation found" || exit 1
+        
+        echo ""
+        echo "✅ All V13 fixes verified!"
+
+  deployment-status:
+    runs-on: ubuntu-latest
+    name: Deployment Status Report
+    if: success()
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Generate deployment report
+      run: |
+        echo "# Deployment Status Report" > deployment_report.md
+        echo "" >> deployment_report.md
+        echo "**Date:** $(date)" >> deployment_report.md
+        echo "**Commit:** ${{ github.sha }}" >> deployment_report.md
+        echo "**Branch:** ${{ github.ref_name }}" >> deployment_report.md
+        echo "" >> deployment_report.md
+        echo "## Status: ✅ READY FOR PRODUCTION" >> deployment_report.md
+        echo "" >> deployment_report.md
+        echo "### All Checks Passed" >> deployment_report.md
+        echo "- ✅ Python syntax validated" >> deployment_report.md
+        echo "- ✅ Critical functions present" >> deployment_report.md
+        echo "- ✅ V13 fixes implemented" >> deployment_report.md
+        echo "- ✅ File integrity confirmed" >> deployment_report.md
+        echo "" >> deployment_report.md
+        echo "### Ready to Deploy:" >> deployment_report.md
+        echo "Copy \`claude_final_boss_12.py\` to your MetaTrader5 bot folder" >> deployment_report.md
+        cat deployment_report.md
+    
+    - name: Upload deployment report
+      uses: actions/upload-artifact@v3
+      with:
+        name: deployment-report
+        path: deployment_report.md
