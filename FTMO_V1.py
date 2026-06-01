@@ -119,8 +119,8 @@ ANTHROPIC_API_KEY = _os.environ.get("ANTHROPIC_API_KEY", "")
 # TELEGRAM NOTIFICATIONS
 # =========================
 TELEGRAM_ENABLED   = True
-TELEGRAM_TOKEN     = _os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID   = _os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOKEN     = _os.environ.get("FTMO_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = _os.environ.get("FTMO_CHAT_ID", "")
 TELEGRAM_TIMEOUT   = 5  # seconds — never block trading loop
 
 def _tg_send_blocking(text: str) -> None:
@@ -3607,8 +3607,8 @@ def execute_trade(symbol, direction, meta):
         cp(mode_key,
            f"[OPEN|{entry_mode.upper()}] {direction} | {symbol} | Ticket:{result.order} "
            f"| Entry:{actual_entry:.5f} | SL:{sl:.5f} | TP:{tp:.5f} | RR:{rr}R")
-        logger.info("[OPEN|%s] %s | Ticket:%s | Entry:%.5f | SL:%.5f | TP:%.5f | RR:%.2fR",
-                    entry_mode.upper(), direction, result.order, actual_entry, sl, tp, rr)
+        logger.info("[OPEN|%s] %s | %s | Ticket:%s | Entry:%.5f | SL:%.5f | TP:%.5f | RR:%.2fR",
+                    entry_mode.upper(), direction, symbol, result.order, actual_entry, sl, tp, rr)
         tg_send(
             f"🟢 <b>OPEN {direction}</b> {symbol} ({entry_mode.upper()})\n"
             f"Ticket: <code>{result.order}</code>\n"
