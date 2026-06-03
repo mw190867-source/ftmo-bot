@@ -3971,6 +3971,8 @@ def execute_trade(symbol, direction, meta):
             "be_target_reached_ts": None,
             "atr_open":  meta.get("atr"),
             "shadow_verdict": "pending",
+            # Broker-truth fallback: balance at open for balance-delta P/L reconstruction
+            "balance_open": float(_acc_at_open.balance) if _acc_at_open else 0.0,
         }
         _phoenix_emit("TRADE_OPEN", symbol,
                       f"{direction} {symbol} | entry={actual_entry:.5f} | ticket={result.order}",
@@ -4426,7 +4428,40 @@ def _finalise_close(ticket, known_symbol, deal, meta=None):
             _sign = 1 if _dir == "BUY" else -1
             _move = _sign * (est_close - _entry)
             _sl_dist = abs(_entry - _orig_sl) if _orig_sl else 0
-            est_pl = round(_move / _sl_dist * _risk_gbp, 2) if _sl_dist > 0 else None
+
+            # Bug B — unit sanity checks before reconstruction math
+            _is_xau = known_symbol.upper().startswith("XAU")
+            _sl_units_bad = False
+            if _is_xau and _sl_dist < 1.0:
+                logger.warning("[CLOSE_RECONSTRUCT] %s | _sl_dist=%.5f < 1.0 — likely pip units, skipping math",
+                               known_symbol, _sl_dist)
+                _sl_units_bad = True
+            elif not _is_xau and _sl_dist > 0.01:
+                logger.warning("[CLOSE_RECONSTRUCT] %s | _sl_dist=%.5f > 0.01 — likely wrong units, skipping math",
+                               known_symbol, _sl_dist)
+                _sl_units_bad = True
+
+            if _sl_dist > 0 and not _sl_units_bad:
+                est_pl = round(_move / _sl_dist * _risk_gbp, 2)
+                if abs(est_pl) > 1000:
+                    logger.warning("[CLOSE_RECONSTRUCT] %s | est_pl=%.2f exceeds £1000 sanity bound — discarding",
+                                   known_symbol, est_pl)
+                    est_pl = None
+
+        # Balance-delta fallback: broker's truth when math reconstruction fails or is skipped
+        if est_pl is None:
+            _acc_now = mt5.account_info()
+            _bal_before = float((meta or {}).get("balance_open", 0) or 0)
+            if _acc_now and _bal_before > 0:
+                _bal_delta = round(_acc_now.balance - _bal_before, 2)
+                if -500 <= _bal_delta <= 1000:
+                    est_pl = _bal_delta
+                    recon_src = "balance_delta"
+                    logger.info("[CLOSE_RECONSTRUCT] %s | balance_delta | before=%.2f now=%.2f delta=%.2f",
+                                known_symbol, _bal_before, _acc_now.balance, _bal_delta)
+                else:
+                    logger.warning("[CLOSE_RECONSTRUCT] %s | balance_delta=%.2f outside bounds — discarding",
+                                   known_symbol, _bal_delta)
 
         if est_close is not None:
             cp("CLOSE", f"[CLOSE_RECONSTRUCTED] {known_symbol} | Ticket:{ticket}"
@@ -4473,10 +4508,13 @@ def _finalise_close(ticket, known_symbol, deal, meta=None):
             "yes" if known_symbol in opportunity_alerts else "no",
             est_pl or 0.0,
         )
+        _pl_line = (
+            f"P/L: £{est_pl:+.2f} <i>(from balance delta)</i>"   if recon_src == "balance_delta" and est_pl is not None else
+            f"P/L: <i>est £{est_pl:+.2f} — VERIFY IN MT5</i>"    if est_pl is not None else
+            "P/L: <i>unknown — check MT5 manually</i>"
+        )
         tg_send(
-            f"⚪ <b>CLOSE</b> {known_symbol} | Ticket: <code>{ticket}</code>\n"
-            + (f"P/L: <i>est £{est_pl:.2f} — VERIFY IN MT5</i>"
-               if est_pl is not None else "P/L: <i>unknown — check MT5 manually</i>")
+            f"⚪ <b>CLOSE</b> {known_symbol} | Ticket: <code>{ticket}</code>\n{_pl_line}"
         )
         _shadow_csv_fill_outcome(ticket, est_close or 0.0, est_pl, 0.0)
     play_sound("close")
