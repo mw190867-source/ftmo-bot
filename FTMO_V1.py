@@ -116,12 +116,46 @@ _load_dotenv()
 ANTHROPIC_API_KEY = _os.environ.get("ANTHROPIC_API_KEY", "")
 
 # =========================
+# CLAUDE RESILIENCE — health tracking
+# =========================
+_claude_health = {
+    "available":            True,
+    "last_success_ts":      time.time(),
+    "consecutive_failures": 0,
+    "last_failure_reason":  None,
+    "last_failure_ts":      None,
+    "fallback_mode":        False,
+    "fallback_since_ts":    None,
+    "recovery_test_due_ts": 0,
+    "trades_in_fallback":   0,
+    "total_fallback_count": 0,
+    "current_status":       "ONLINE",  # ONLINE | DEGRADED | FALLBACK | RECOVERING
+}
+CLAUDE_FALLBACK_THRESHOLD     = 3
+CLAUDE_RECOVERY_TEST_INTERVAL = 300   # 5 min between recovery pings
+
+# Daily Claude outage tracking — reset by reset_daily_trackers() at midnight
+_claude_daily = {
+    "date":                 None,   # UTC date of last reset (date object)
+    "fallback_activations": 0,      # times fallback was entered today
+    "fallback_total_mins":  0,      # total minutes in fallback today
+    "fallback_trades":      0,      # trades via fallback logic today
+}
+_last_daily_summary_date_utc = None  # prevents duplicate daily-summary fires
+
+# =========================
 # TELEGRAM NOTIFICATIONS
 # =========================
 TELEGRAM_ENABLED   = True
 TELEGRAM_TOKEN     = _os.environ.get("FTMO_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = _os.environ.get("FTMO_CHAT_ID", "")
 TELEGRAM_TIMEOUT   = 5  # seconds — never block trading loop
+# Fix 6 — verify token loaded correctly at startup
+if TELEGRAM_TOKEN:
+    logger.info("[TELEGRAM] FTMO_BOT_TOKEN loaded (%d chars) | chat=%s",
+                len(TELEGRAM_TOKEN), TELEGRAM_CHAT_ID or "NOT_SET")
+else:
+    logger.warning("[TELEGRAM] FTMO_BOT_TOKEN not found in env — notifications disabled")
 
 def _tg_send_blocking(text: str) -> None:
     """Internal — HTTP call. Run in a daemon thread so trading never waits."""
@@ -145,10 +179,29 @@ def tg_send(text: str) -> None:
     """Fire-and-forget Telegram notification. Safe to call from anywhere."""
     if not TELEGRAM_ENABLED:
         return
+    if DEMO_MODE:                        # Fix 7 — prefix all messages in demo
+        text = "[DEMO] " + text
     try:
         threading.Thread(target=_tg_send_blocking, args=(text,), daemon=True).start()
     except Exception:
         pass
+
+def _ops_notify_safe(message: str) -> None:
+    """Fire-and-forget notification to OPS channel. Cannot hang or crash bot."""
+    def _send():
+        try:
+            subprocess.run(
+                ["python3", "/root/phoenix2026/phoenix-core/ops_notifier.py", message],
+                timeout=5,
+                capture_output=True,
+                env={**_os.environ},
+            )
+        except Exception as e:
+            logger.warning("[OPS_NOTIFY] Failed silently: %s", e)
+    try:
+        threading.Thread(target=_send, daemon=True).start()
+    except Exception as e:
+        logger.warning("[OPS_NOTIFY] Could not spawn thread: %s", e)
 
 # =========================
 # CLAUDE SHADOW MODE — CONTEXT BUILDER & API CALL
@@ -247,9 +300,218 @@ def _build_claude_context(symbol, direction, entry_mode, score, meta, utc_dt, at
     }
     return context
 
+# =========================
+# CLAUDE RESILIENCE — helpers
+# =========================
+
+def claude_call_safe(prompt: str, system_prompt: str,
+                     model: str = "claude-sonnet-4-6",
+                     timeout: int = 10):
+    """Unified Claude API wrapper with full error classification.
+    Returns (text, error_reason). text=None on any failure.
+    Always calls _mark_claude_success or _mark_claude_failure.
+    """
+    if not ANTHROPIC_API_KEY:
+        _mark_claude_failure("API_KEY_MISSING")
+        return None, "API_KEY_MISSING"
+    try:
+        import json as _cj
+        req_data = _cj.dumps({
+            "model": model,
+            "max_tokens": 200,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=req_data,
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        body = _cj.loads(resp.read().decode("utf-8"))
+        resp.close()
+        text = body.get("content", [{}])[0].get("text", "").strip()
+        _mark_claude_success()
+        return text, None
+    except urllib.error.HTTPError as _he:
+        _code = _he.code
+        try:    _ebody = _he.read().decode("utf-8", errors="replace")[:200]
+        except: _ebody = ""
+        if _code == 401:                 reason = "API_KEY_INVALID"
+        elif _code == 402:               reason = "CREDITS_EXHAUSTED"
+        elif _code == 429:               reason = "RATE_LIMIT"
+        elif _code == 400:               reason = "BAD_REQUEST"
+        elif 500 <= _code < 600:         reason = f"SERVER_ERROR_{_code}"
+        else:                            reason = f"HTTP_{_code}"
+        logger.warning("[CLAUDE_CALL] HTTP %d | reason=%s | %s", _code, reason, _ebody[:80])
+        _mark_claude_failure(reason)
+        return None, reason
+    except Exception as _ce:
+        _es = str(_ce).lower()
+        if "timed out" in _es or "timeout" in _es:   reason = "TIMEOUT"
+        elif "name or service" in _es:                reason = "NETWORK_ERROR"
+        else:                                         reason = f"EXCEPTION:{str(_ce)[:50]}"
+        logger.warning("[CLAUDE_CALL] %s", reason)
+        _mark_claude_failure(reason)
+        return None, reason
+
+
+def _mark_claude_success():
+    global _claude_health, _claude_daily
+    was_fallback   = _claude_health["fallback_mode"]
+    fallback_since = _claude_health["fallback_since_ts"]
+    trades_in      = _claude_health["trades_in_fallback"]
+    _claude_health.update({
+        "available": True, "last_success_ts": time.time(),
+        "consecutive_failures": 0, "last_failure_reason": None,
+        "fallback_mode": False, "fallback_since_ts": None,
+        "trades_in_fallback": 0, "recovery_test_due_ts": 0,
+        "current_status": "ONLINE",
+    })
+    if was_fallback and fallback_since:
+        mins = int((time.time() - fallback_since) / 60)
+        _claude_daily["fallback_total_mins"] += mins
+        _claude_daily["fallback_trades"]     += trades_in
+        logger.info("[CLAUDE_RECOVERY] ONLINE | fallback_duration=%dmin | trades_in_fallback=%d",
+                    mins, trades_in)
+        tg_send(f"🟢 <b>Claude AI — RECOVERED</b>\n"
+                f"Back online after {mins} min in fallback\n"
+                f"Trades executed in fallback: {trades_in}")
+
+
+def _mark_claude_failure(reason: str):
+    global _claude_health, _claude_daily
+    CRITICAL = {"CREDITS_EXHAUSTED", "API_KEY_INVALID", "API_KEY_MISSING"}
+    _claude_health["consecutive_failures"] += 1
+    _claude_health["last_failure_reason"]   = reason
+    _claude_health["last_failure_ts"]       = time.time()
+    n = _claude_health["consecutive_failures"]
+    was_fallback = _claude_health["fallback_mode"]
+    if reason in CRITICAL or n >= CLAUDE_FALLBACK_THRESHOLD:
+        if not was_fallback:
+            _claude_health.update({
+                "fallback_mode":        True,
+                "fallback_since_ts":    time.time(),
+                "total_fallback_count": _claude_health["total_fallback_count"] + 1,
+                "recovery_test_due_ts": time.time() + CLAUDE_RECOVERY_TEST_INTERVAL,
+                "current_status":       "FALLBACK",
+            })
+            _claude_daily["fallback_activations"] += 1
+            logger.warning("[CLAUDE_FALLBACK] ENTERING FALLBACK | reason=%s | consec=%d", reason, n)
+            _send_claude_fallback_alert(reason)
+        else:
+            _claude_health["recovery_test_due_ts"] = time.time() + CLAUDE_RECOVERY_TEST_INTERVAL
+    else:
+        _claude_health["current_status"] = "DEGRADED"
+
+
+def _send_claude_fallback_alert(reason: str):
+    if reason == "CREDITS_EXHAUSTED":
+        msg = ("🔴 <b>Claude AI — CREDITS EXHAUSTED</b>\n"
+               "Top up: console.anthropic.com/settings/billing\n"
+               "Bot continuing in score-based fallback mode")
+    elif reason in ("API_KEY_INVALID", "API_KEY_MISSING"):
+        msg = ("🔴 <b>Claude AI — API KEY INVALID/MISSING</b>\n"
+               "Check ANTHROPIC_API_KEY in /root/Downloads/.env\n"
+               "Bot continuing in score-based fallback mode")
+    else:
+        msg = (f"🔴 <b>Claude AI — FALLBACK MODE</b>\n"
+               f"Reason: {reason}\n"
+               f"Bot continuing with score-based fallback logic\n"
+               f"Recovery test every {CLAUDE_RECOVERY_TEST_INTERVAL // 60} min")
+    tg_send(msg)
+    _ops_notify_safe(f"FTMO Claude FALLBACK: {reason}")
+
+
+def _fallback_validate(symbol: str, direction: str, entry_mode: str,
+                       score: int, meta: dict):
+    """Score + HTF quality gate when Claude is unavailable.
+    Returns (proceed, verdict, reason, risk_level, conviction).
+    Conviction capped at 3 — conservative without Claude insight."""
+    _claude_health["trades_in_fallback"] += 1
+    if score < 3:
+        return False, "FALLBACK", f"score {score} < minimum 3", "STANDARD", 0
+    htf        = meta.get("htf")
+    htf_ok     = htf not in (None, "UNKNOWN", "?")
+    if score >= 7:   base_conviction = 3
+    elif score >= 5: base_conviction = 2
+    else:            base_conviction = 1
+    if not htf_ok:
+        base_conviction = max(1, base_conviction - 1)
+    reason = (f"FALLBACK | score={score} | htf={'ok' if htf_ok else 'unknown'} "
+              f"| conviction={base_conviction}")
+    logger.info("[CLAUDE_FALLBACK_DECISION] %s %s | %s", symbol, direction, reason)
+    return True, "FALLBACK", reason, "STANDARD", base_conviction
+
+
+def _test_claude_recovery() -> bool:
+    """Cheap haiku ping — True if Claude API is reachable again.
+    Always uses claude-haiku-4-5 regardless of trading model — cost ~$0.0000003."""
+    _claude_health["current_status"] = "RECOVERING"
+    text, _err = claude_call_safe(
+        "Reply with the single word: OK",
+        "Respond only with the word OK.",
+        model="claude-haiku-4-5",   # cheapest model — connectivity test only
+        timeout=5,
+    )
+    return bool(text and "OK" in text.upper())
+
+
+def _send_daily_ops_summary():
+    """Fire once per day at 07:00 UTC via ops_notifier. Includes Claude outage line if applicable."""
+    global _last_daily_summary_date_utc
+    now_utc   = datetime.utcnow().replace(tzinfo=pytz.UTC)
+    today_key = now_utc.strftime("%Y-%m-%d")
+    if _last_daily_summary_date_utc == today_key:
+        return
+    # Only fire in the 07:00–07:09 UTC window
+    if not (now_utc.hour == 7 and now_utc.minute < 10):
+        return
+    _last_daily_summary_date_utc = today_key
+
+    acc = mt5.account_info()
+    eq_str = f"£{acc.equity:.2f}" if acc else "unavailable"
+
+    lines = [f"📊 <b>Daily Summary — FTMO Bot</b> ({today_key})",
+             f"• Equity: {eq_str}"]
+
+    # Claude outage line — only if there was at least one fallback activation today
+    if _claude_daily["fallback_activations"] > 0:
+        lines.append(
+            f"• Claude outages today: {_claude_daily['fallback_activations']} "
+            f"({_claude_daily['fallback_total_mins']} min, "
+            f"{_claude_daily['fallback_trades']} trades in fallback)"
+        )
+
+    msg = "\n".join(lines)
+    logger.info("[DAILY_SUMMARY] %s", msg.replace("\n", " | "))
+    _ops_notify_safe(msg)
+
+
+def _claude_daily_reset():
+    """Reset per-day Claude stats. Called from reset_daily_trackers()."""
+    global _claude_daily
+    today = date.today()
+    if _claude_daily["date"] != today:
+        _claude_daily = {
+            "date":                 today,
+            "fallback_activations": 0,
+            "fallback_total_mins":  0,
+            "fallback_trades":      0,
+        }
+
+
 def _claude_shadow_evaluate(symbol, direction, entry_mode, score, meta, utc_dt, atr, sl_dist, ticket=None):
     """Fire-and-forget Claude evaluation. Returns immediately; logs result async."""
-    if not CLAUDE_SHADOW_ENABLED or not ANTHROPIC_API_KEY:
+    if not CLAUDE_SHADOW_ENABLED:
+        return None
+    if not ANTHROPIC_API_KEY:
+        _mark_claude_failure("API_KEY_MISSING")
         return None
     try:
         context = _build_claude_context(symbol, direction, entry_mode, score, meta, utc_dt, atr, sl_dist)
@@ -261,49 +523,32 @@ def _claude_shadow_evaluate(symbol, direction, entry_mode, score, meta, utc_dt, 
         verdict = "pending"
         reason = "Signal passed all structural filters — AI review queued"
         confidence = 0.0
-        try:
-            import json as _json
-            system_prompt = (
-                "You are a forex trading evaluator. Analyze the trade context and respond ONLY with valid JSON. "
-                "No explanations, no markdown, just the JSON object.\n"
-                "Fields:\n"
-                '- "verdict": one of "approve", "approve_reduced", "block"\n'
-                '- "reason": one sentence maximum explaining your decision\n'
-                '- "confidence": a float from 0.0 to 1.0 indicating your certainty'
-            )
-            user_msg = _json.dumps(context, default=str)
-
-            req_data = _json.dumps({
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 80,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_msg}],
-            }).encode("utf-8")
-
-            url = "https://api.anthropic.com/v1/messages"
-            headers = {
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            }
-            req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
-            resp = urllib.request.urlopen(req, timeout=8)
-            body = _json.loads(resp.read().decode("utf-8"))
-            content = body.get("content", [{}])[0].get("text", "{}")
-            # Strip markdown code fences if present
-            if content.startswith("```"):
-                content = content.split("\n", 1)[-1]
-                if content.endswith("```"):
-                    content = content[:-3]
-            result = _json.loads(content)
-            verdict = result.get("verdict", "unknown")
-            reason = result.get("reason", "")
-            confidence = float(result.get("confidence", 0.0))
-        except Exception as e:
-            logger.debug("[CLAUDE_SHADOW] API call failed: %s", e)
-            verdict = "pending"
-            confidence = 0.0
-            reason = "Signal passed all structural filters — AI review queued"
+        import json as _json
+        _shadow_system = (
+            "You are a forex trading evaluator. Analyze the trade context and respond ONLY with valid JSON. "
+            "No explanations, no markdown, just the JSON object.\n"
+            "Fields:\n"
+            '- "verdict": one of "approve", "approve_reduced", "block"\n'
+            '- "reason": one sentence maximum explaining your decision\n'
+            '- "confidence": a float from 0.0 to 1.0 indicating your certainty\n'
+            '- "conviction": integer 1-5 rating setup quality (1=minimal edge, 3=standard, 5=A+ setup)'
+        )
+        user_msg  = _json.dumps(context, default=str)
+        raw_text, _serr = claude_call_safe(user_msg, _shadow_system,
+                                           model="claude-sonnet-4-6", timeout=8)
+        if raw_text:
+            try:
+                content = raw_text
+                if content.startswith("```"):
+                    content = content.split("\n", 1)[-1]
+                    if content.endswith("```"):
+                        content = content[:-3]
+                result     = _json.loads(content)
+                verdict    = result.get("verdict", "unknown")
+                reason     = result.get("reason", "")
+                confidence = float(result.get("confidence", 0.0))
+            except Exception as _pe:
+                logger.debug("[CLAUDE_SHADOW] JSON parse failed: %s", _pe)
 
         logger.info("[CLAUDE_SHADOW] %s | %s | verdict=%s | confidence=%.2f | reason=%s | actual=EXECUTED",
                     symbol, direction, verdict, confidence, reason)
@@ -333,66 +578,67 @@ def _claude_hard_gate_evaluate(symbol, direction, entry_mode, score, meta, utc_d
     Timeout is shorter than shadow mode (5s vs 8s) since this blocks execution.
     """
     if not ANTHROPIC_API_KEY:
-        logger.warning("[CLAUDE_HARD_GATE] No API key — blocking trade")
-        return False
+        proceed, _, fb_reason, _, _ = _fallback_validate(symbol, direction, entry_mode, score, meta)
+        logger.warning("[CLAUDE_HARD_GATE] No API key — fallback | proceed=%s | %s", proceed, fb_reason)
+        return proceed
+
+    # Recovery test when in fallback and interval has elapsed
+    if (_claude_health["fallback_mode"]
+            and time.time() >= _claude_health["recovery_test_due_ts"]):
+        if not _test_claude_recovery():
+            _claude_health["recovery_test_due_ts"] = time.time() + CLAUDE_RECOVERY_TEST_INTERVAL
+
+    # If in fallback, use score-based decision rather than blocking the trade
+    if _claude_health["fallback_mode"]:
+        proceed, _, fb_reason, _, _ = _fallback_validate(symbol, direction, entry_mode, score, meta)
+        logger.info("[CLAUDE_HARD_GATE] %s %s | FALLBACK | proceed=%s | %s",
+                    symbol, direction, proceed, fb_reason)
+        cp("CLAUDE_GATE", f"{'✅' if proceed else '🚫'} [FALLBACK] {symbol} {direction} | {fb_reason}")
+        return proceed
 
     try:
         context = _build_claude_context(symbol, direction, entry_mode, score, meta, utc_dt, atr, sl_dist)
     except Exception as e:
         logger.warning("[CLAUDE_HARD_GATE] Context build failed: %s", e)
-        return False
+        proceed, _, fb_reason, _, _ = _fallback_validate(symbol, direction, entry_mode, score, meta)
+        return proceed
 
     try:
         import json as _json
         system_prompt = (
-            "You are a strict gold trading evaluator. XAUUSD is in CORRECTIVE regime. "
-            "Analyze this trade context and respond ONLY with valid JSON. "
-            "Be conservative — reject marginal setups.\n\n"
+            "You are a forex trading evaluator. Analyze this trade context and respond ONLY with valid JSON. "
+            "No explanations, no markdown, just the JSON object.\n\n"
             "Response format (JSON only, no markdown):\n"
             '{"verdict": "approve" | "block", '
             '"reason": "one sentence", '
-            '"confidence": 0.0-1.0}\n\n'
+            '"confidence": 0.0-1.0, '
+            '"conviction": 1-5}\n\n'
             'VERDICT RULES:\n'
-            '- "approve": Only if setup has clear edge (score≥5, strong structure, sweep confirmation)\n'
-            '- "block": If setup is marginal, late in session, or lacks clear confluence\n'
-            '- confidence ≥0.7 required for approve'
+            '- "approve": Clear structural edge, good confluence, score justifies trade\n'
+            '- "block": Marginal setup, late in session, or unclear confluence\n'
+            '- confidence >= 0.5 required for approve\n'
+            '- conviction: 1=minimal edge, 2=below standard, 3=standard, 4=high conviction, 5=A+ setup'
         )
-        user_msg = _json.dumps(context, default=str)
+        user_msg  = _json.dumps(context, default=str)
+        raw_text, _herr = claude_call_safe(user_msg, system_prompt,
+                                           model="claude-sonnet-4-6", timeout=timeout_secs)
+        if raw_text is None:
+            proceed, _, fb_reason, _, _ = _fallback_validate(symbol, direction, entry_mode, score, meta)
+            logger.info("[CLAUDE_HARD_GATE] %s %s | API_UNAVAILABLE fallback | proceed=%s | %s",
+                        symbol, direction, proceed, fb_reason)
+            return proceed
 
-        req_data = _json.dumps({
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 80,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_msg}],
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=req_data,
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            method="POST"
-        )
-
-        resp = urllib.request.urlopen(req, timeout=timeout_secs)
-        body = _json.loads(resp.read().decode("utf-8"))
-        content = body.get("content", [{}])[0].get("text", "{}")
-
-        # Strip markdown code fences if present
+        content = raw_text
         if content.startswith("```"):
             content = content.split("\n", 1)[-1]
             if content.endswith("```"):
                 content = content[:-3]
 
-        result = _json.loads(content)
-        verdict = result.get("verdict", "block").lower()
-        reason = result.get("reason", "no reason")
+        result     = _json.loads(content)
+        verdict    = result.get("verdict", "block").lower()
+        reason     = result.get("reason", "no reason")
         confidence = float(result.get("confidence", 0.0))
-
-        approved = verdict in ("approve", "approve_reduced") and confidence >= 0.7
+        approved   = verdict in ("approve", "approve_reduced") and confidence >= 0.5
 
         if approved:
             logger.info("[CLAUDE_HARD_GATE] %s %s | APPROVED | confidence=%.2f | %s",
@@ -402,14 +648,12 @@ def _claude_hard_gate_evaluate(symbol, direction, entry_mode, score, meta, utc_d
             logger.info("[CLAUDE_HARD_GATE] %s %s | BLOCKED | verdict=%s | confidence=%.2f | %s",
                         symbol, direction, verdict, confidence, reason)
             cp("CLAUDE_GATE", f"🚫 [CLAUDE] {symbol} {direction} BLOCKED | verdict={verdict}")
-
         return approved
 
     except Exception as e:
-        logger.warning("[CLAUDE_HARD_GATE] API call failed: %s", e)
-        logger.info("[CLAUDE_HARD_GATE] %s %s | pending | confidence=0.00 | Signal passed all structural filters — AI review queued",
-                    symbol, direction)
-        return False
+        logger.warning("[CLAUDE_HARD_GATE] parse error: %s", e)
+        proceed, _, fb_reason, _, _ = _fallback_validate(symbol, direction, entry_mode, score, meta)
+        return proceed
 
 
 # =========================
@@ -467,42 +711,24 @@ def _send_session_brief():
 
     def _call():
         brief_text = None
-        try:
-            if not ANTHROPIC_API_KEY:
-                raise RuntimeError("no_api_key")
-            import json as _json
-            system_prompt = (
-                "You are a forex trading session analyst. Given pre-session context across 4 symbols "
-                "(XAUUSD, EURUSD, GBPUSD, USDJPY), write EXACTLY 3 sentences of plain English: "
-                "(1) which symbols have best HTF alignment for today's session, "
-                "(2) what to watch for in the London open, "
-                "(3) any caution flags. No markdown, no lists, no preamble. Terse and practical."
-            )
-            user_msg = _json.dumps(ctx, default=str)
-            req_data = _json.dumps({
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 200,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_msg}],
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                "https://api.anthropic.com/v1/messages",
-                data=req_data,
-                headers={
-                    "x-api-key": ANTHROPIC_API_KEY,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                method="POST",
-            )
-            resp = urllib.request.urlopen(req, timeout=15)
-            body = _json.loads(resp.read().decode("utf-8"))
-            brief_text = body.get("content", [{}])[0].get("text", "").strip()
-            if not brief_text:
-                raise RuntimeError("empty_response")
-            logger.info("[SESSION_BRIEF] Claude OK: %s", brief_text.replace("\n", " ")[:500])
-        except Exception as e:
-            logger.warning("[SESSION_BRIEF] Claude call failed (%s) — sending raw stats fallback", e)
+        import json as _bj
+        _brief_system = (
+            "You are a forex trading session analyst. Given pre-session context across 4 symbols "
+            "(XAUUSD, EURUSD, GBPUSD, USDJPY), write EXACTLY 3 sentences of plain English: "
+            "(1) which symbols have best HTF alignment for today's session, "
+            "(2) what to watch for in the London open, "
+            "(3) any caution flags. No markdown, no lists, no preamble. Terse and practical."
+        )
+        raw_brief, _berr = claude_call_safe(
+            _bj.dumps(ctx, default=str), _brief_system,
+            model="claude-sonnet-4-6", timeout=15,
+        )
+        if raw_brief:
+            brief_text = raw_brief.strip() or None
+            if brief_text:
+                logger.info("[SESSION_BRIEF] Claude OK: %s", brief_text.replace("\n", " ")[:500])
+        else:
+            logger.warning("[SESSION_BRIEF] Claude call failed (%s) — raw stats fallback", _berr)
 
         header = "\U0001F305 <b>Pre-session brief</b> (07:55 London)"
         if brief_text:
@@ -613,28 +839,41 @@ def rates_ok(arr, min_len=1):
 # ── TESTING MODE ──────────────────────────────────────────────────
 TESTING_MODE = False  # Production mode for FTMO challenge
 CLAUDE_SHADOW_ENABLED = True  # Shadow-mode Claude reasoning — evaluates but never blocks
+DEMO_MODE = True   # Fix 7 — True=demo account ([DEMO] prefix on Telegram). Set False for live challenge.
 # ──────────────────────────────────────────────────────────────────
 
 SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "GBPJPY"]
+# Fix 1 — Challenge 4 symbol filter: EURUSD (-£173, 26% WR) and GBPJPY (-£171, 33% WR) disabled
+SYMBOL_FILTER_ACTIVE = frozenset(["GBPUSD", "XAUUSD"])
 
 GBPJPY_SHADOW_MODE = False  # V5.3 — shadow validation complete, enabling live execution
 GBPJPY_SHADOW_START = datetime.utcnow().replace(tzinfo=pytz.UTC)
 
-# V5.3 — raised from 0.003/0.004/0.0035 — need higher risk to pass 14-day challenge
-RISK_PERCENT     = 0.005              # V5.3 raised from 0.003 (0.3% → 0.5%)
-MAX_RISK_PERCENT = 0.008              # unchanged cap
+# Fix 4 — Challenge 4 risk: reduced from 0.5% (47% WR too low for 0.5% base)
+RISK_PERCENT     = 0.004              # Fix 4: reduced from 0.005
+MAX_RISK_PERCENT = 0.008              # Must be ≥ 0.008 so conviction-5 (0.80%) can fire (Adj 4)
 MAX_RISK_MULT    = 3
 MAX_TOTAL_RISK_PERCENT = 0.015
 
-# Dynamic risk scaling by conviction score. Base stays small on marginal setups;
-# high-conviction confluence earns a modest bump. Capped by MAX_RISK_PERCENT.
-# Rationale: asymmetric sizing is how you recover ground without raising DD on weak signals.
+# Fix 4 — Conviction-based risk sizing (ported from WEEKEND_V1.py Hungry-but-Smart).
+# Score is mapped to conviction 1-5; each tier has a risk level.
+# MAX_RISK_PERCENT cap ensures conviction-5 never exceeds 0.80%.
 RISK_SCALING_ENABLED = True
-RISK_BY_SCORE = {
-    # score_min_for_tier : risk_percent
-    7: 0.0065,   # V5.3 raised from 0.004  (0.4% → 0.65%)
-    6: 0.006,    # V5.3 raised from 0.0035 (0.35% → 0.6%)
+RISK_BY_CONVICTION = {
+    1: 0.0025,   # 0.25% — minimal edge
+    2: 0.0035,   # 0.35% — below standard
+    3: 0.0040,   # 0.40% — standard setup
+    4: 0.0060,   # 0.60% — high conviction
+    5: 0.0080,   # 0.80% — A+ setup (capped by MAX_RISK_PERCENT)
 }
+
+def _score_to_conviction(score: int) -> int:
+    """Map trade score to conviction level 1–5 for risk sizing."""
+    if score >= 8:  return 5
+    if score >= 7:  return 4
+    if score >= 5:  return 3
+    if score >= 3:  return 2
+    return 1
 MAGIC            = 123456
 DEVIATION        = 20
 
@@ -760,6 +999,93 @@ LOSS_CLUSTER_THRESHOLD   = 2         # Losses required to trigger block
 LOSS_CLUSTER_BLOCK_S     = 60 * 60   # Block duration after threshold reached
 _loss_cluster_alerted: set = set()   # (symbol, direction) tuples already Telegram-alerted this block
 
+# =========================
+# FIX 2 — PER-SYMBOL AUTO-DISABLE
+# =========================
+_sym_consec_losses:      dict = defaultdict(int)                       # symbol → consecutive loss count
+_sym_recent_wl:          dict = defaultdict(lambda: deque(maxlen=10))  # symbol → last 10 T/F results
+_sym_auto_disabled_until: dict = {}                                     # symbol → re-enable epoch ts
+SYM_DISABLE_CONSEC      = 4       # disable after N consecutive losses
+SYM_DISABLE_WR_MIN      = 0.40   # disable if WR < 40% over last 10 trades
+SYM_DISABLE_DURATION_S  = 86400  # 24 hours (or restart re-enables immediately)
+
+def _update_sym_perf(symbol: str, profit: float):
+    """Record trade result; auto-disable symbol if performance thresholds breached."""
+    target = canonical_symbol(symbol)
+    won    = profit >= 0
+    if not won:
+        _sym_consec_losses[target] += 1
+    else:
+        _sym_consec_losses[target] = 0
+    _sym_recent_wl[target].append(won)
+    consec = _sym_consec_losses[target]
+    wl     = list(_sym_recent_wl[target])
+    wr     = sum(wl) / len(wl) if len(wl) >= 10 else None
+    reason = None
+    if consec >= SYM_DISABLE_CONSEC:
+        reason = f"{SYM_DISABLE_CONSEC}_consec_losses"
+    elif wr is not None and wr < SYM_DISABLE_WR_MIN:
+        reason = f"wr_{wr:.0%}_lt_40pct_last10"
+    if reason:
+        re_at  = time.time() + SYM_DISABLE_DURATION_S
+        _sym_auto_disabled_until[target] = re_at
+        re_str = datetime.utcfromtimestamp(re_at).strftime('%Y-%m-%d %H:%M UTC')
+        logger.warning("[SYMBOL_DISABLED] %s | reason=%s | re-enable_after=%s",
+                       target, reason, re_str)
+        tg_send(
+            f"⛔ <b>SYMBOL AUTO-DISABLED</b>\n"
+            f"{target} | reason={reason}\n"
+            f"Re-enable after: {re_str}\n"
+            f"(or restart bot to re-enable immediately)"
+        )
+        # Adjustment 3 — also alert OPS channel for operational awareness
+        _ops_notify_safe(f"⛔ FTMO symbol auto-disabled: {target} ({reason})")
+
+def is_sym_auto_disabled(symbol: str) -> bool:
+    """Return True if symbol is currently in the auto-disable window."""
+    target = canonical_symbol(symbol)
+    until  = _sym_auto_disabled_until.get(target)
+    if until is None:
+        return False
+    if time.time() >= until:
+        _sym_auto_disabled_until.pop(target, None)
+        logger.info("[SYMBOL_REENABLED] %s | 24h auto-disable expired", target)
+        return False
+    return True
+
+# =========================
+# FIX 5 — QUICK-LOSS SESSION PAUSE
+# =========================
+_session_quick_losses: list = []   # epoch timestamps of quick (<30 min) losses this session
+_bot_pause_until: float     = 0.0  # epoch ts when pause expires (0 = not paused)
+QUICK_LOSS_COUNT_THRESHOLD  = 3
+QUICK_LOSS_MAX_MINS         = 30
+BOT_PAUSE_HOURS             = 1    # Adjustment 2: 1h is enough — 2h loses too many setups
+
+def _record_quick_loss(symbol: str):
+    """Track quick losses; pause bot for BOT_PAUSE_HOURS if threshold hit this session."""
+    global _session_quick_losses, _bot_pause_until
+    target = canonical_symbol(symbol)
+    if target not in SYMBOL_FILTER_ACTIVE:  # Adjustment 2: only count enabled symbols
+        return
+    now             = time.time()
+    session_midnight = datetime.utcnow().replace(
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=pytz.UTC).timestamp()
+    _session_quick_losses = [t for t in _session_quick_losses if t >= session_midnight]
+    _session_quick_losses.append(now)
+    if len(_session_quick_losses) >= QUICK_LOSS_COUNT_THRESHOLD:
+        _bot_pause_until = now + BOT_PAUSE_HOURS * 3600
+        resume_str       = datetime.utcfromtimestamp(_bot_pause_until).strftime('%H:%M UTC')
+        logger.warning("[QUICK_LOSS_PAUSE] %d quick losses in session | paused until %s",
+                       len(_session_quick_losses), resume_str)
+        tg_send(
+            f"⚠️ <b>FTMO PAUSE — Quick-loss spike</b>\n"
+            f"{QUICK_LOSS_COUNT_THRESHOLD} trades closed losing in &lt;{QUICK_LOSS_MAX_MINS} min this session\n"
+            f"Bot paused until: <b>{resume_str}</b>\n"
+            f"Likely cause: entry timing issue or news event"
+        )
+        _session_quick_losses.clear()
+
 def record_loss(symbol, direction, entry_price, profit, ts=None):
     """Record a closed losing trade. Called from close paths when profit < 0."""
     if profit is None or profit >= 0:
@@ -883,6 +1209,7 @@ SYMBOL_CONFIG = {
         "atr_threshold": 0.3, "pip_value": 0.01, "spread_limit": 0.65, "spread_limit_kz": 0.8,  # V5.3 — raised from 0.60, evening session hitting 0.64
         "bos_min_disp_mult": 0.25, "bos_lookback": 40,
         "bos_use_wicks": True, "bos_require_cross": False,
+        "breakout_body_ratio": 0.30,   # Fix 3A: gold has wider wicks — lower than forex default 0.55
         "pb_entry_buffer_atr_mult": 0.15, "cont_trigger_atr_mult": 0.60,
         "pb_exhaustion_atr_mult": 15.0,
         "min_rr": 1.5,    # Raised from 1.25 — Apr 24 XAU trades all filled at RR 1.25-1.54, TP clipped by liquidity target. 1.5 matches EUR/GBP floor and forces better R setups.
@@ -1067,7 +1394,7 @@ XAUUSD_REGIME_PARAMS = {
         "pullback_enabled": True,     # Re-enable pullbacks in corrective mode
         "score_min_pullback": 5,      # But require strong confluence
         "require_sweep": True,        # MANDATORY: sweep must precede BOS
-        "claude_gate": "hard",        # Claude is a hard gate — block means no trade
+        "claude_gate": "shadow",      # Fix 3B: changed from "hard" — hard gate blocked all CORRECTIVE gold
         "sl_pips": 20,               # Wider SL for noisy conditions
         "min_rr": 2.0,               # Higher RR required to compensate
         "max_session_range_pct": 0.7, # Block if price already moved >70% of typical range
@@ -1201,8 +1528,8 @@ def classify_gold_regime(symbol="XAUUSD"):
 
     if compressed_vol and h1_direction == "NEUTRAL":
         new_regime = "COMPRESSION"
-    elif h1_direction in ("BULL", "BEAR") and elevated_vol and h4_crosses < 3:
-        new_regime = "TRENDING"
+    elif h1_direction in ("BULL", "BEAR") and h4_atr_ratio > 1.1 and h4_crosses < 4:
+        new_regime = "TRENDING"   # Fix 3B: lowered vol threshold 1.3→1.1, raised cross limit 3→4
     # else stays CORRECTIVE
 
     # Update global state
@@ -1319,6 +1646,7 @@ def _fetch_economic_calendar():
         )
         resp = urllib.request.urlopen(req, timeout=10)
         data = json.loads(resp.read().decode("utf-8"))
+        resp.close()
 
         # Parse events - filter to high-impact USD events
         events = []
@@ -1561,7 +1889,8 @@ def reset_daily_trackers():
     _daily_reset_date          = today
     _consecutive_losses        = 0
     _risk_scale_cooldown_until = None
-    RISK_PERCENT               = 0.005   # restore to default on daily reset
+    RISK_PERCENT               = 0.004   # Fix 4: restore to Challenge 4 base (was 0.005)
+    _claude_daily_reset()                # reset per-day Claude outage counters
     acc = mt5.account_info()
     if acc is None:
         logger.warning("Daily reset: account_info unavailable (counters reset anyway)")
@@ -3305,6 +3634,9 @@ def calculate_sl_tp_liquidity(symbol, direction, entry, liquidity_tp, atr, sl_mu
 def execute_trade(symbol, direction, meta):
     global daily_trade_counts
 
+    if is_sym_auto_disabled(symbol):        # Fix 2 — per-symbol auto-disable gate
+        _gate_hit(symbol, "sym_auto_disabled"); return
+
     if daily_halt:
         _gate_hit(symbol, "daily_halt"); return
     # Per-symbol daily cap override (e.g. GBPUSD raised to 4); falls back to global MAX_TRADES_PER_DAY.
@@ -3487,17 +3819,16 @@ def execute_trade(symbol, direction, meta):
         cp("ERROR", f"❌ SL/TP invalid {symbol} | {reason}")
         _gate_hit(symbol, "sltp"); return
 
-    # Score-based risk scaling: high-conviction setups (5+/6+) get a modest bump.
-    # Falls back to base RISK_PERCENT on marginal scores or if scaling is disabled.
+    # Fix 4 — Conviction-based risk sizing. Score → conviction 1-5 → risk tier.
+    # MAX_RISK_PERCENT=0.008 ensures conviction-5 (0.80%) can fire (Adj 4).
+    conviction  = _score_to_conviction(int(meta.get("score", 0)))  # default; overridden below
     scaled_risk = RISK_PERCENT
     if RISK_SCALING_ENABLED:
         trade_score = int(meta.get("score", 0))
-        for min_score, tier_risk in sorted(RISK_BY_SCORE.items(), reverse=True):
-            if trade_score >= min_score:
-                scaled_risk = min(tier_risk, MAX_RISK_PERCENT)
-                logger.info("%s risk-scaling | score=%d → risk=%.3f%% (base=%.3f%%)",
-                            symbol, trade_score, scaled_risk * 100, RISK_PERCENT * 100)
-                break
+        conviction  = _score_to_conviction(trade_score)
+        scaled_risk = min(RISK_BY_CONVICTION.get(conviction, RISK_PERCENT), MAX_RISK_PERCENT)
+        logger.info("%s conviction-sizing | score=%d → conviction=%d → risk=%.3f%%",
+                    symbol, trade_score, conviction, scaled_risk * 100)
 
     # Capture £-denominated 1R risk before lot sizing (used for accurate r_multiple on close)
     _acc_at_open = mt5.account_info()
@@ -3614,7 +3945,8 @@ def execute_trade(symbol, direction, meta):
             f"Ticket: <code>{result.order}</code>\n"
             f"Entry: <code>{actual_entry:.5f}</code>\n"
             f"SL: <code>{sl:.5f}</code> | TP: <code>{tp:.5f}</code>\n"
-            f"RR: {rr}R | Lot: {lot}"
+            f"RR: {rr}R | Conviction: {conviction}/5 | Risk: £{risk_gbp:.0f} ({scaled_risk*100:.2f}%)\n"
+            f"Score: {meta.get('score', 0)}"
         )
         play_sound("open")
         r1_level[result.order]            = (entry + sl_dist if direction == "BUY" else entry - sl_dist)
@@ -3698,12 +4030,12 @@ def _update_equity_curve_risk(profit):
                 "[RISK_SCALED_DOWN] level=0.25%% reason=2_consecutive_losses"
                 " | consec=%d", _consecutive_losses)
     else:
-        if _consecutive_losses > 0 or RISK_PERCENT != 0.005:
+        if _consecutive_losses > 0 or RISK_PERCENT != 0.004:
             _consecutive_losses        = 0
             _risk_scale_cooldown_until = None
-            RISK_PERCENT               = 0.005
-            cp("SYSTEM", "[RISK_RESTORED] RISK_PERCENT back to 0.5%")
-            logger.info("[RISK_RESTORED] back to 0.5%%")
+            RISK_PERCENT               = 0.004   # Fix 4: restored to 0.4% base
+            cp("SYSTEM", "[RISK_RESTORED] RISK_PERCENT back to 0.4%")
+            logger.info("[RISK_RESTORED] back to 0.4%%")
 def close_position(pos, reason):
     tick = mt5.symbol_info_tick(pos.symbol)
     if not tick:
@@ -3733,6 +4065,7 @@ def close_position(pos, reason):
             record_loss(pos.symbol, _dir, pos.price_open, pos.profit)
         # Equity-curve risk scaling
         _update_equity_curve_risk(pos.profit)
+        _update_sym_perf(pos.symbol, pos.profit)   # Fix 2 — per-symbol performance tracker
         for d in (open_trades, be_locked, r1_level, peak_profit_tracker, partial_done):
             d.pop(pos.ticket, None)
         # [POST_CLOSE_COOLDOWN] — block new entries on this symbol for 25 min
@@ -4058,6 +4391,9 @@ def _finalise_close(ticket, known_symbol, deal, meta=None):
             record_loss(symbol, meta.get("type"), meta.get("entry"), profit)
         # Equity-curve risk scaling
         _update_equity_curve_risk(profit)
+        _update_sym_perf(symbol, profit)                              # Fix 2 — per-symbol tracker
+        if profit < 0 and 0 <= duration_mins < QUICK_LOSS_MAX_MINS:  # Fix 5 — quick-loss tracker
+            _record_quick_loss(symbol)
     else:
         # All deal-lookup strategies exhausted. Try history_orders_get as last resort.
         _dir     = meta.get("type",    "?") if meta else "?"
@@ -4322,9 +4658,15 @@ def log_heartbeat():
     
     # Only log to file every HEARTBEAT_INTERVAL_SEC to avoid spam
     if last_heartbeat_log_utc is None or (now_utc - last_heartbeat_log_utc).total_seconds() >= HEARTBEAT_INTERVAL_SEC:
-        heartbeat_msg = f"[HEARTBEAT] Uptime:{uptime_str} | Active trades:{len(open_trades)} | {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        _ch_status = _claude_health["current_status"]
+        if _claude_health["fallback_mode"] and _claude_health["fallback_since_ts"]:
+            _fb_mins  = int((time.time() - _claude_health["fallback_since_ts"]) / 60)
+            _ch_status = f"FALLBACK({_fb_mins}m,{_claude_health['trades_in_fallback']}t)"
+        heartbeat_msg = (f"[HEARTBEAT] Uptime:{uptime_str} | Active trades:{len(open_trades)} | "
+                         f"Claude:{_ch_status} | {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         logger.info(heartbeat_msg)
         cp("SYSTEM", f"💓 {heartbeat_msg}")
+        _send_daily_ops_summary()   # fires once/day at 07:00 UTC via ops_notifier
         
         # Also write to separate heartbeat file for easy monitoring
         try:
@@ -4889,6 +5231,14 @@ def _gate_report_if_due():
 # MAIN LOOP
 # =========================
 cp("SYSTEM", "━" * 65)
+# Adjustment 1 — impossible-to-miss DEMO/LIVE mode banner
+_acc_startup = mt5.account_info()
+_mt5_login   = _acc_startup.login if _acc_startup else "UNKNOWN"
+_mode_str    = "🟡 DEMO MODE" if DEMO_MODE else "🔴 LIVE MODE"
+logger.info("=" * 60)
+logger.info("[STARTUP] %s | FTMO Account: %s", _mode_str, _mt5_login)
+logger.info("=" * 60)
+tg_send(f"<b>{_mode_str}</b>\nFTMO Bot starting on account {_mt5_login}")
 if TESTING_MODE:
     cp("WARNING", "  ⚠️  TESTING MODE — relaxed limits active")
     cp("WARNING", f"     max_open={SYMBOL_CONFIG['XAUUSD']['max_trades']}/sym  "
@@ -4934,6 +5284,13 @@ for _s in SYMBOLS:
     cp("SYSTEM", f"  Mgmt {_s}: {' + '.join(_parts)}")
 cp("SYSTEM", "━" * 65)
 
+# Fix 1 — Challenge 4 symbol filter startup log
+_disabled_syms = [s for s in SYMBOLS if s not in SYMBOL_FILTER_ACTIVE]
+logger.info("[SYMBOL_FILTER] Active: %s | Disabled: %s (poor historical performance)",
+            ", ".join(sorted(SYMBOL_FILTER_ACTIVE)), ", ".join(_disabled_syms))
+cp("SYSTEM", f"  [SYMBOL_FILTER] Active: {', '.join(sorted(SYMBOL_FILTER_ACTIVE))} | "
+             f"Disabled: {', '.join(_disabled_syms)} (poor historical performance)")
+
 now_utc = get_utc_time()
 for sym in SYMBOLS:
     cfg      = SESSION_LOCAL[sym]
@@ -4947,6 +5304,22 @@ for sym in SYMBOLS:
 # FIX 4 (V13.1) — logger updated
 logger.info("%s %s | session gate in signal engine | mgmt defaults False | BE 1-pip | continuation log dedupe",
             BOT_NAME, BOT_VERSION)
+
+# =========================
+# SIGNAL HANDLERS — log SIGTERM/SIGINT/SIGHUP before death
+# =========================
+import signal as _signal
+
+def _signal_handler(signum, frame):
+    sig_name = _signal.Signals(signum).name
+    logger.critical("[SIGNAL_RECEIVED] Got %s — attempting graceful shutdown", sig_name)
+    tg_send(f"🛑 <b>FTMO bot received {sig_name}</b> — shutting down")
+    _ops_notify_safe(f"🛑 FTMO bot received {sig_name}")
+    raise KeyboardInterrupt(f"Signal {sig_name}")
+
+_signal.signal(_signal.SIGTERM, _signal_handler)
+_signal.signal(_signal.SIGINT, _signal_handler)
+_signal.signal(_signal.SIGHUP, _signal_handler)
 
 # Initialize bot monitoring
 bot_start_time_utc = datetime.utcnow().replace(tzinfo=pytz.UTC)
@@ -4987,75 +5360,103 @@ init_scanner(
 run_opportunity_scan()
 
 while True:
-    if not is_connected():
-        cp("WARNING", "⚠️  MT5 connection lost — reconnecting…")
-        logger.warning("MT5 connection lost")
-        reconnect_mt5()
-        reconcile_open_positions()
-    
-    # Check for data stalls even if connection appears healthy
-    if check_tick_freshness():
-        cp("WARNING", "⚠️  Data stall detected — forcing reconnect…")
-        logger.warning("Data stall detected - forcing reconnect")
-        reconnect_mt5()
-        reconcile_open_positions()
+    try:
+        if not is_connected():
+            cp("WARNING", "⚠️  MT5 connection lost — reconnecting…")
+            logger.warning("MT5 connection lost")
+            reconnect_mt5()
+            reconcile_open_positions()
 
-    reset_daily_trackers()
+        # Check for data stalls even if connection appears healthy
+        if check_tick_freshness():
+            cp("WARNING", "⚠️  Data stall detected — forcing reconnect…")
+            logger.warning("Data stall detected - forcing reconnect")
+            reconnect_mt5()
+            reconcile_open_positions()
 
-    if check_daily_drawdown():
-        cp("HALT", "🛑 Daily halt — management only")
-        detect_closed_trades()
-        manage_trades()
-        time.sleep(5)
-        continue
+        reset_daily_trackers()
 
-    if check_total_loss():
-        cp("HALT", "🛑 FTMO total loss limit reached — stopping bot")
-        logger.critical("FTMO total loss limit reached - bot stopped")
-        break  # Stop bot if FTMO total loss limit reached
-
-    utc_time = get_utc_time()
-
-    for symbol in SYMBOLS:
-        last_gate_reason.pop(symbol, None)
-        cp("HEADER", f"┌ {utc_time.strftime('%H:%M:%S')} UTC | {symbol}")
-        logger.info("%s UTC | %s", utc_time.strftime("%H:%M:%S"), symbol)
-
-        if not market_open(symbol):
-            cp("MARKET_CLOSED", f"└ {symbol} market closed")
-            logger.info("%s market closed", symbol)
+        if check_daily_drawdown():
+            cp("HALT", "🛑 Daily halt — management only")
+            detect_closed_trades()
+            manage_trades()
+            time.sleep(5)
             continue
 
-        sig, price, meta = get_signal(symbol)
+        if check_total_loss():
+            cp("HALT", "🛑 FTMO total loss limit reached — stopping bot")
+            logger.critical("FTMO total loss limit reached - bot stopped")
+            break  # Stop bot if FTMO total loss limit reached
 
-        if sig == "BUY":
-            mode      = meta.get("entry_mode", "pullback") if meta else "pullback"
-            color_key = "BREAKOUT" if mode == "breakout" else "BUY"
-            cp(color_key, f"└ {symbol} ✅ BUY [{mode.upper()}] | Price={price:.5f}")
-            logger.info("%s BUY [%s] | Price=%s", symbol, mode, price)
-            execute_trade(symbol, "BUY", meta or {})
+        # Fix 5 — Quick-loss session pause check
+        if _bot_pause_until and time.time() < _bot_pause_until:
+            _resume_str = datetime.utcfromtimestamp(_bot_pause_until).strftime('%H:%M UTC')
+            cp("HALT", f"🛑 [QUICK_LOSS_PAUSE] Bot paused until {_resume_str} — management only")
+            detect_closed_trades(); manage_trades(); log_heartbeat()
+            time.sleep(5); continue
+        elif _bot_pause_until and time.time() >= _bot_pause_until:
+            _bot_pause_until = 0.0
+            logger.info("[QUICK_LOSS_PAUSE] Pause expired — resuming trading")
+            tg_send("✅ Quick-loss pause expired — trading resumed")
 
-        elif sig == "SELL":
-            mode      = meta.get("entry_mode", "pullback") if meta else "pullback"
-            color_key = "CONTINUATION" if mode == "continuation" else "SELL"
-            cp(color_key, f"└ {symbol} 🔻 SELL [{mode.upper()}] | Price={price:.5f}")
-            logger.info("%s SELL [%s] | Price=%s", symbol, mode, price)
-            execute_trade(symbol, "SELL", meta or {})
+        utc_time = get_utc_time()
 
-        else:
-            diag = build_diagnostic_line(symbol, price, utc_time)
-            if _should_emit_hold_log(symbol, diag):
-                cp("DIAG", f"└ {diag}")
-                logger.info("%s", diag)
+        for symbol in SYMBOLS:
+            if symbol not in SYMBOL_FILTER_ACTIVE:   # Fix 1 — skip disabled symbols
+                continue
+            if is_sym_auto_disabled(symbol):          # Fix 2 — skip auto-disabled symbols
+                continue
+            last_gate_reason.pop(symbol, None)
+            cp("HEADER", f"┌ {utc_time.strftime('%H:%M:%S')} UTC | {symbol}")
+            logger.info("%s UTC | %s", utc_time.strftime("%H:%M:%S"), symbol)
 
-    check_pending_pullbacks()
-    _gate_report_if_due()
-    detect_closed_trades()
-    manage_trades()
-    log_heartbeat()
-    _session_brief_check()
-    run_opportunity_scan()
-    time.sleep(5)
+            if not market_open(symbol):
+                cp("MARKET_CLOSED", f"└ {symbol} market closed")
+                logger.info("%s market closed", symbol)
+                continue
+
+            sig, price, meta = get_signal(symbol)
+
+            if sig == "BUY":
+                mode      = meta.get("entry_mode", "pullback") if meta else "pullback"
+                color_key = "BREAKOUT" if mode == "breakout" else "BUY"
+                cp(color_key, f"└ {symbol} ✅ BUY [{mode.upper()}] | Price={price:.5f}")
+                logger.info("%s BUY [%s] | Price=%s", symbol, mode, price)
+                execute_trade(symbol, "BUY", meta or {})
+
+            elif sig == "SELL":
+                mode      = meta.get("entry_mode", "pullback") if meta else "pullback"
+                color_key = "CONTINUATION" if mode == "continuation" else "SELL"
+                cp(color_key, f"└ {symbol} 🔻 SELL [{mode.upper()}] | Price={price:.5f}")
+                logger.info("%s SELL [%s] | Price=%s", symbol, mode, price)
+                execute_trade(symbol, "SELL", meta or {})
+
+            else:
+                diag = build_diagnostic_line(symbol, price, utc_time)
+                if _should_emit_hold_log(symbol, diag):
+                    cp("DIAG", f"└ {diag}")
+                    logger.info("%s", diag)
+
+        check_pending_pullbacks()
+        _gate_report_if_due()
+        detect_closed_trades()
+        manage_trades()
+        log_heartbeat()
+        _session_brief_check()
+        run_opportunity_scan()
+        time.sleep(5)
+
+    except KeyboardInterrupt:
+        raise
+    except Exception as _loop_exc:
+        import traceback as _tb
+        _loop_tb = _tb.format_exc()
+        logger.error("[MAIN_LOOP_EXCEPTION] %s", _loop_exc)
+        logger.error(_loop_tb)
+        _ops_notify_safe(f"🚨 FTMO bot main loop exception:\n{type(_loop_exc).__name__}: {_loop_exc}")
+        tg_send(f"🚨 <b>FTMO main loop exception</b>\n<code>{type(_loop_exc).__name__}: {str(_loop_exc)[:200]}</code>")
+        time.sleep(5)
+        continue
 
 # TODO: Post-challenge 3 — Implement ORB (Opening Range Breakout) strategy
 # - Build opening range capture function: first 15-30 min of London (08:00-08:15/08:30 BST) and NY (13:00-13:15/13:30 BST)
